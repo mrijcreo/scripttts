@@ -48,12 +48,12 @@ export async function POST(request: NextRequest) {
       const hasAudio = audioFiles[`slide_${slideNumber}`]
       
       // Create clean notes XML content
-      const notesXml = createCleanNotesXml(slide.script || '', slideNumber, hasAudio)
+      const notesXml = createCleanNotesXml(slide.script || '', slideNumber)
       
       // Add or update the notes file
       pptx.file(notesFileName, notesXml)
       
-      // Add audio trigger to slide if audio exists
+      // Add audio to slide if audio exists
       if (hasAudio) {
         await addAudioToSlide(pptx, slideNumber, `audio${slideNumber}.wav`)
       }
@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
 }
 
 // Create clean notes XML without microphone references
-function createCleanNotesXml(scriptText: string, slideNumber: number, hasAudio: boolean): string {
+function createCleanNotesXml(scriptText: string, slideNumber: number): string {
   // Escape XML special characters
   const escapedScript = scriptText
     .replace(/&/g, '&amp;')
@@ -157,7 +157,7 @@ function createCleanNotesXml(scriptText: string, slideNumber: number, hasAudio: 
 </p:notes>`
 }
 
-// Add audio element to slide with proper PowerPoint audio controls
+// Add audio element to slide with proper PowerPoint audio controls and auto-play
 async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: string) {
   const slideFileName = `ppt/slides/slide${slideNumber}.xml`
   const slideFile = pptx.files[slideFileName]
@@ -170,34 +170,44 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
   try {
     let slideXml = await slideFile.async('text')
     
-    // Add audio shape with microphone icon to slide
+    // Generate unique IDs for this slide
+    const audioShapeId = 1000 + slideNumber
+    const audioRelId = `rId${100 + slideNumber}`
+    
+    // Add audio shape to slide - positioned in bottom right corner
     const audioShape = `
     <p:pic>
       <p:nvPicPr>
-        <p:cNvPr id="${8000 + slideNumber}" name="Audio ${slideNumber}">
+        <p:cNvPr id="${audioShapeId}" name="Audio ${slideNumber}">
           <a:hlinkClick r:id="" action="ppaction://media"/>
         </p:cNvPr>
         <p:cNvPicPr>
           <a:picLocks noChangeAspect="1"/>
         </p:cNvPicPr>
         <p:nvPr>
-          <a:audioFile r:embed="rId${7000 + slideNumber}"/>
+          <a:audioFile r:embed="${audioRelId}"/>
           <a:extLst>
             <a:ext uri="{DAA4B4D4-6D71-4841-9C94-3DE7FCFB9230}">
-              <p14:media xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" r:embed="rId${7000 + slideNumber}"/>
+              <p14:media xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" r:embed="${audioRelId}"/>
             </a:ext>
           </a:extLst>
         </p:nvPr>
       </p:nvPicPr>
       <p:blipFill>
-        <a:blip r:embed="rId${6000 + slideNumber}"/>
+        <a:blip r:embed="${audioRelId}">
+          <a:extLst>
+            <a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}">
+              <a14:useLocalDpi xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" val="0"/>
+            </a:ext>
+          </a:extLst>
+        </a:blip>
         <a:stretch>
           <a:fillRect/>
         </a:stretch>
       </p:blipFill>
       <p:spPr>
         <a:xfrm>
-          <a:off x="9144000" y="6858000"/>
+          <a:off x="8229600" y="5486400"/>
           <a:ext cx="609600" cy="609600"/>
         </a:xfrm>
         <a:prstGeom prst="rect">
@@ -217,7 +227,7 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
     // Insert audio shape before closing spTree tag
     slideXml = slideXml.replace('</p:spTree>', audioShape + '\n    </p:spTree>')
     
-    // Add timing for auto-play
+    // Add comprehensive timing for auto-play when slide appears
     const timingXml = `
   <p:timing>
     <p:tnLst>
@@ -230,7 +240,7 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
                   <p:par>
                     <p:cTn id="3" fill="hold">
                       <p:stCondLst>
-                        <p:cond evt="onBegin" delay="1000"/>
+                        <p:cond evt="onBegin" delay="500"/>
                       </p:stCondLst>
                       <p:childTnLst>
                         <p:par>
@@ -244,7 +254,7 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
                                     </p:stCondLst>
                                   </p:cTn>
                                   <p:tgtEl>
-                                    <p:spTgt spid="${8000 + slideNumber}"/>
+                                    <p:spTgt spid="${audioShapeId}"/>
                                   </p:tgtEl>
                                 </p:cMediaNode>
                               </p:audio>
@@ -263,7 +273,7 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
     </p:tnLst>
   </p:timing>`
     
-    // Add timing section before closing slide tag
+    // Add timing section before closing slide tag if not already present
     if (!slideXml.includes('<p:timing>')) {
       slideXml = slideXml.replace('</p:sld>', timingXml + '\n</p:sld>')
     }
@@ -271,7 +281,7 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
     // Update the slide file
     pptx.file(slideFileName, slideXml)
     
-    console.log(`Added audio controls to slide ${slideNumber}`)
+    console.log(`Added audio controls with auto-play to slide ${slideNumber}`)
     
   } catch (error) {
     console.error(`Error adding audio to slide ${slideNumber}:`, error)
@@ -289,7 +299,7 @@ async function updateContentTypes(pptx: JSZip) {
   if (!contentTypes.includes('application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml')) {
     contentTypes = contentTypes.replace(
       '</Types>',
-      '  <Default Extension="xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>\n</Types>'
+      '  <Override PartName="/ppt/notesSlides/notesSlide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>\n</Types>'
     )
   }
   
@@ -301,20 +311,12 @@ async function updateContentTypes(pptx: JSZip) {
     )
   }
   
-  // Add image content type for audio icons
-  if (!contentTypes.includes('image/png')) {
-    contentTypes = contentTypes.replace(
-      '</Types>',
-      '  <Default Extension="png" ContentType="image/png"/>\n</Types>'
-    )
-  }
-  
   pptx.file('[Content_Types].xml', contentTypes)
 }
 
 // Update relationships for slides and audio
 async function updateRelationships(pptx: JSZip, slides: any[], audioFiles: { [key: string]: boolean }) {
-  // Update main presentation relationships
+  // Update main presentation relationships for notes slides
   const relsFile = pptx.files['ppt/_rels/presentation.xml.rels']
   if (relsFile) {
     let rels = await relsFile.async('text')
@@ -322,7 +324,7 @@ async function updateRelationships(pptx: JSZip, slides: any[], audioFiles: { [ke
     // Add relationships for notes slides
     for (let i = 0; i < slides.length; i++) {
       const slideNumber = i + 1
-      const relId = `rId${1000 + slideNumber}`
+      const relId = `rId${200 + slideNumber}`
       
       if (!rels.includes(`notesSlides/notesSlide${slideNumber}.xml`)) {
         rels = rels.replace(
@@ -340,31 +342,33 @@ async function updateRelationships(pptx: JSZip, slides: any[], audioFiles: { [ke
     const slideNumber = i + 1
     if (!audioFiles[`slide_${slideNumber}`]) continue
     
-    const slideRelsFile = pptx.files[`ppt/slides/_rels/slide${slideNumber}.xml.rels`]
+    const slideRelsPath = `ppt/slides/_rels/slide${slideNumber}.xml.rels`
+    const slideRelsFile = pptx.files[slideRelsPath]
+    
+    const audioRelId = `rId${100 + slideNumber}`
+    const audioTarget = `../media/audio${slideNumber}.wav`
+    
     if (slideRelsFile) {
       let slideRels = await slideRelsFile.async('text')
       
-      // Add audio relationship
-      const audioRelId = `rId${7000 + slideNumber}`
-      const iconRelId = `rId${6000 + slideNumber}`
-      
-      if (!slideRels.includes(`media/audio${slideNumber}.wav`)) {
+      // Add audio relationship if not present
+      if (!slideRels.includes(audioTarget)) {
         slideRels = slideRels.replace(
           '</Relationships>',
-          `  <Relationship Id="${audioRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio" Target="../media/audio${slideNumber}.wav"/>\n</Relationships>`
+          `  <Relationship Id="${audioRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio" Target="${audioTarget}"/>\n</Relationships>`
         )
       }
       
-      pptx.file(`ppt/slides/_rels/slide${slideNumber}.xml.rels`, slideRels)
+      pptx.file(slideRelsPath, slideRels)
     } else {
       // Create new relationships file for slide
       const newSlideRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
-  <Relationship Id="rId${7000 + slideNumber}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio" Target="../media/audio${slideNumber}.wav"/>
+  <Relationship Id="${audioRelId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/audio" Target="${audioTarget}"/>
 </Relationships>`
       
-      pptx.file(`ppt/slides/_rels/slide${slideNumber}.xml.rels`, newSlideRels)
+      pptx.file(slideRelsPath, newSlideRels)
     }
   }
 }

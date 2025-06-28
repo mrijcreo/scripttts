@@ -3,6 +3,7 @@
 import { useState, useRef } from 'react'
 import { saveAs } from 'file-saver'
 import * as XLSX from 'xlsx'
+import GeminiTTS, { GEMINI_VOICES, EMOTION_STYLES } from './GeminiTTS'
 
 interface Slide {
   slideNumber: number
@@ -15,6 +16,14 @@ interface ProcessingStatus {
   stage: 'idle' | 'extracting' | 'generating' | 'adding-notes' | 'complete'
   progress: number
   message: string
+}
+
+interface PresentationTTSState {
+  isPlaying: boolean
+  currentSlide: number
+  isPaused: boolean
+  isLoading: boolean
+  error: string | null
 }
 
 export default function PowerPointProcessor() {
@@ -39,7 +48,29 @@ export default function PowerPointProcessor() {
   const [useTutoyeren, setUseTutoyeren] = useState(true) // Default to true
   const [isTutoyerenProcessing, setIsTutoyerenProcessing] = useState(false)
   
+  // NEW: Presentation TTS State
+  const [presentationTTS, setPresentationTTS] = useState<PresentationTTSState>({
+    isPlaying: false,
+    currentSlide: 0,
+    isPaused: false,
+    isLoading: false,
+    error: null
+  })
+  
+  // NEW: TTS Settings for presentation
+  const [presentationTTSSettings, setPresentationTTSSettings] = useState({
+    useGeminiTTS: true, // Default to Gemini TTS for better quality
+    selectedVoice: GEMINI_VOICES[3], // Kore as default
+    selectedEmotion: EMOTION_STYLES[0], // Neutraal
+    speechRate: 1.0, // For Microsoft TTS
+    pauseBetweenSlides: 2000, // 2 seconds pause between slides
+    announceSlideNumbers: true // Announce "Slide 1", "Slide 2", etc.
+  })
+  
+  const [showPresentationTTSSettings, setShowPresentationTTSSettings] = useState(false)
+  
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const presentationTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   const handleFileUpload = async (file: File) => {
     if (!file.name.toLowerCase().endsWith('.pptx')) {
@@ -440,6 +471,220 @@ export default function PowerPointProcessor() {
     }
   }
 
+  // NEW: Presentation TTS Functions
+  const startPresentationTTS = async () => {
+    if (slides.length === 0 || !slides.some(slide => slide.script)) {
+      alert('Geen scripts beschikbaar om voor te lezen!')
+      return
+    }
+
+    setPresentationTTS(prev => ({
+      ...prev,
+      isPlaying: true,
+      currentSlide: 0,
+      isPaused: false,
+      error: null
+    }))
+
+    await playSlideScript(0)
+  }
+
+  const pausePresentationTTS = () => {
+    setPresentationTTS(prev => ({
+      ...prev,
+      isPaused: true
+    }))
+    
+    // Clear any pending timeouts
+    if (presentationTimeoutRef.current) {
+      clearTimeout(presentationTimeoutRef.current)
+      presentationTimeoutRef.current = null
+    }
+  }
+
+  const resumePresentationTTS = async () => {
+    setPresentationTTS(prev => ({
+      ...prev,
+      isPaused: false
+    }))
+    
+    // Resume from current slide
+    await playSlideScript(presentationTTS.currentSlide)
+  }
+
+  const stopPresentationTTS = () => {
+    setPresentationTTS({
+      isPlaying: false,
+      currentSlide: 0,
+      isPaused: false,
+      isLoading: false,
+      error: null
+    })
+    
+    // Clear any pending timeouts
+    if (presentationTimeoutRef.current) {
+      clearTimeout(presentationTimeoutRef.current)
+      presentationTimeoutRef.current = null
+    }
+  }
+
+  const playSlideScript = async (slideIndex: number) => {
+    if (slideIndex >= slides.length || presentationTTS.isPaused) {
+      if (slideIndex >= slides.length) {
+        // Presentation finished
+        setPresentationTTS(prev => ({
+          ...prev,
+          isPlaying: false,
+          currentSlide: 0
+        }))
+      }
+      return
+    }
+
+    const slide = slides[slideIndex]
+    if (!slide.script) {
+      // Skip slides without scripts
+      await moveToNextSlide(slideIndex)
+      return
+    }
+
+    setPresentationTTS(prev => ({
+      ...prev,
+      currentSlide: slideIndex,
+      isLoading: true,
+      error: null
+    }))
+
+    try {
+      // Prepare text to speak
+      let textToSpeak = ''
+      
+      if (presentationTTSSettings.announceSlideNumbers) {
+        textToSpeak = `Slide ${slide.slideNumber}. ${slide.title}. `
+      }
+      
+      textToSpeak += slide.script
+
+      // Apply emotion styling if using Gemini TTS
+      if (presentationTTSSettings.useGeminiTTS && presentationTTSSettings.selectedEmotion.prompt) {
+        textToSpeak = presentationTTSSettings.selectedEmotion.prompt + textToSpeak
+      }
+
+      if (presentationTTSSettings.useGeminiTTS) {
+        // Use Gemini TTS
+        const response = await fetch('/api/generate-tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: textToSpeak,
+            voiceName: presentationTTSSettings.selectedVoice.name,
+            multiSpeaker: false
+          }),
+        })
+
+        if (!response.ok) {
+          throw new Error(`TTS API fout: ${response.status}`)
+        }
+
+        const audioBlob = await response.blob()
+        const audioUrl = URL.createObjectURL(audioBlob)
+        const audio = new Audio(audioUrl)
+
+        setPresentationTTS(prev => ({ ...prev, isLoading: false }))
+
+        // Play audio and wait for completion
+        await new Promise<void>((resolve, reject) => {
+          audio.onended = () => {
+            URL.revokeObjectURL(audioUrl)
+            resolve()
+          }
+          audio.onerror = () => {
+            URL.revokeObjectURL(audioUrl)
+            reject(new Error('Audio playback failed'))
+          }
+          audio.play().catch(reject)
+        })
+
+      } else {
+        // Use Microsoft TTS
+        if (!('speechSynthesis' in window)) {
+          throw new Error('Speech synthesis not supported')
+        }
+
+        const utterance = new SpeechSynthesisUtterance(textToSpeak)
+        utterance.rate = presentationTTSSettings.speechRate
+        utterance.pitch = 1.1
+        utterance.volume = 0.9
+        utterance.lang = 'nl-NL'
+
+        setPresentationTTS(prev => ({ ...prev, isLoading: false }))
+
+        // Play speech and wait for completion
+        await new Promise<void>((resolve, reject) => {
+          utterance.onend = () => resolve()
+          utterance.onerror = () => reject(new Error('Speech synthesis failed'))
+          window.speechSynthesis.speak(utterance)
+        })
+      }
+
+      // Move to next slide after pause
+      await moveToNextSlide(slideIndex)
+
+    } catch (error) {
+      console.error('TTS Error for slide', slideIndex, ':', error)
+      setPresentationTTS(prev => ({
+        ...prev,
+        error: `Fout bij slide ${slideIndex + 1}: ${error instanceof Error ? error.message : 'Onbekende fout'}`,
+        isLoading: false
+      }))
+      
+      // Continue to next slide after error
+      setTimeout(() => moveToNextSlide(slideIndex), 1000)
+    }
+  }
+
+  const moveToNextSlide = async (currentSlideIndex: number) => {
+    if (presentationTTS.isPaused) return
+
+    const nextSlideIndex = currentSlideIndex + 1
+    
+    if (nextSlideIndex < slides.length) {
+      // Wait for pause between slides
+      presentationTimeoutRef.current = setTimeout(() => {
+        if (!presentationTTS.isPaused) {
+          playSlideScript(nextSlideIndex)
+        }
+      }, presentationTTSSettings.pauseBetweenSlides)
+    } else {
+      // Presentation finished
+      setPresentationTTS(prev => ({
+        ...prev,
+        isPlaying: false,
+        currentSlide: 0
+      }))
+    }
+  }
+
+  const jumpToSlide = async (slideIndex: number) => {
+    if (slideIndex < 0 || slideIndex >= slides.length) return
+
+    // Clear any pending timeouts
+    if (presentationTimeoutRef.current) {
+      clearTimeout(presentationTimeoutRef.current)
+      presentationTimeoutRef.current = null
+    }
+
+    setPresentationTTS(prev => ({
+      ...prev,
+      currentSlide: slideIndex,
+      isPaused: false
+    }))
+
+    if (presentationTTS.isPlaying) {
+      await playSlideScript(slideIndex)
+    }
+  }
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragOver(false)
@@ -469,6 +714,7 @@ export default function PowerPointProcessor() {
     setRegeneratingSlide(null)
     setUseTutoyeren(true) // Reset to default true
     setIsTutoyerenProcessing(false)
+    stopPresentationTTS() // Stop any ongoing presentation
     setStatus({
       stage: 'idle',
       progress: 0,
@@ -491,6 +737,7 @@ export default function PowerPointProcessor() {
     setRegeneratingSlide(null)
     setUseTutoyeren(true) // Reset to default true
     setIsTutoyerenProcessing(false)
+    stopPresentationTTS() // Stop any ongoing presentation
     // Clear scripts from slides but keep the slide content
     const slidesWithoutScripts = slides.map(slide => ({
       ...slide,
@@ -539,10 +786,17 @@ export default function PowerPointProcessor() {
         {/* Slide Header */}
         <div className="flex items-center justify-between mb-4 pb-2 border-b border-gray-100">
           <div className="flex items-center space-x-2">
-            <div className="w-6 h-6 bg-blue-600 rounded text-white text-xs flex items-center justify-center font-bold">
+            <div className={`w-6 h-6 rounded text-white text-xs flex items-center justify-center font-bold ${
+              presentationTTS.isPlaying && presentationTTS.currentSlide === slide.slideNumber - 1
+                ? 'bg-green-600 animate-pulse'
+                : 'bg-blue-600'
+            }`}>
               {slide.slideNumber}
             </div>
             <span className="text-xs text-gray-500 font-medium">SLIDE {slide.slideNumber}</span>
+            {presentationTTS.isPlaying && presentationTTS.currentSlide === slide.slideNumber - 1 && (
+              <span className="text-xs text-green-600 font-medium animate-pulse">🔊 SPEELT AF</span>
+            )}
           </div>
           <div className="text-xs text-gray-400">
             {slide.content.split(' ').length} woorden
@@ -833,6 +1087,305 @@ export default function PowerPointProcessor() {
             </div>
           </div>
 
+          {/* NEW: Presentation TTS Control Panel */}
+          <div className="bg-white rounded-2xl shadow-xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-bold text-gray-800 flex items-center">
+                <span className="w-8 h-8 bg-purple-600 rounded-full flex items-center justify-center mr-3">
+                  🎤
+                </span>
+                Presentatie Voorlezen
+              </h3>
+              
+              <button
+                onClick={() => setShowPresentationTTSSettings(!showPresentationTTSSettings)}
+                className={`px-3 py-2 rounded-lg text-sm transition-all duration-200 ${
+                  showPresentationTTSSettings 
+                    ? 'bg-purple-100 text-purple-700 border border-purple-200' 
+                    : 'bg-gray-100 hover:bg-purple-100 text-gray-600 hover:text-purple-700 border border-gray-200'
+                }`}
+              >
+                ⚙️ TTS Instellingen
+              </button>
+            </div>
+
+            {/* TTS Settings Panel */}
+            {showPresentationTTSSettings && (
+              <div className="mb-6 p-4 bg-purple-50 border border-purple-200 rounded-lg space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* TTS Engine Selection */}
+                  <div>
+                    <label className="block text-purple-700 text-sm font-medium mb-2">🎙️ TTS Engine</label>
+                    <div className="flex space-x-2">
+                      <button
+                        onClick={() => setPresentationTTSSettings(prev => ({ ...prev, useGeminiTTS: false }))}
+                        className={`flex-1 px-3 py-2 text-sm rounded-lg transition-all duration-200 ${
+                          !presentationTTSSettings.useGeminiTTS
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-white text-gray-700 hover:bg-blue-100 border border-gray-200'
+                        }`}
+                      >
+                        🔊 Microsoft TTS
+                      </button>
+                      <button
+                        onClick={() => setPresentationTTSSettings(prev => ({ ...prev, useGeminiTTS: true }))}
+                        className={`flex-1 px-3 py-2 text-sm rounded-lg transition-all duration-200 ${
+                          presentationTTSSettings.useGeminiTTS
+                            ? 'bg-purple-600 text-white'
+                            : 'bg-white text-gray-700 hover:bg-purple-100 border border-gray-200'
+                        }`}
+                      >
+                        🚀 Gemini AI TTS
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Pause Between Slides */}
+                  <div>
+                    <label className="block text-purple-700 text-sm font-medium mb-2">⏱️ Pauze tussen slides</label>
+                    <select
+                      value={presentationTTSSettings.pauseBetweenSlides}
+                      onChange={(e) => setPresentationTTSSettings(prev => ({ 
+                        ...prev, 
+                        pauseBetweenSlides: parseInt(e.target.value) 
+                      }))}
+                      className="w-full p-2 border border-purple-200 rounded-lg bg-white text-purple-700"
+                    >
+                      <option value={1000}>1 seconde</option>
+                      <option value={2000}>2 seconden</option>
+                      <option value={3000}>3 seconden</option>
+                      <option value={5000}>5 seconden</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Microsoft TTS Settings */}
+                {!presentationTTSSettings.useGeminiTTS && (
+                  <div>
+                    <label className="block text-blue-700 text-sm font-medium mb-2">⚡ Spraaksnelheid</label>
+                    <div className="grid grid-cols-4 gap-2">
+                      {[
+                        { label: '🐌 Langzaam', value: 0.75 },
+                        { label: '📚 Normaal', value: 1.0 },
+                        { label: '⚡ Snel', value: 1.5 },
+                        { label: '🚀 Allersnelst', value: 2.0 }
+                      ].map((option) => (
+                        <button
+                          key={option.value}
+                          onClick={() => setPresentationTTSSettings(prev => ({ 
+                            ...prev, 
+                            speechRate: option.value 
+                          }))}
+                          className={`px-3 py-2 text-xs rounded-lg transition-all duration-200 ${
+                            presentationTTSSettings.speechRate === option.value
+                              ? 'bg-blue-600 text-white'
+                              : 'bg-white text-blue-700 hover:bg-blue-100 border border-blue-200'
+                          }`}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Gemini TTS Settings */}
+                {presentationTTSSettings.useGeminiTTS && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-purple-700 text-sm font-medium mb-2">🎭 Stemkeuze</label>
+                      <select
+                        value={presentationTTSSettings.selectedVoice.name}
+                        onChange={(e) => {
+                          const voice = GEMINI_VOICES.find(v => v.name === e.target.value)
+                          if (voice) {
+                            setPresentationTTSSettings(prev => ({ ...prev, selectedVoice: voice }))
+                          }
+                        }}
+                        className="w-full p-2 border border-purple-200 rounded-lg bg-white text-purple-700"
+                      >
+                        {GEMINI_VOICES.map((voice) => (
+                          <option key={voice.name} value={voice.name}>
+                            {voice.name} - {voice.description}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-purple-700 text-sm font-medium mb-2">😊 Emotie</label>
+                      <select
+                        value={presentationTTSSettings.selectedEmotion.name}
+                        onChange={(e) => {
+                          const emotion = EMOTION_STYLES.find(em => em.name === e.target.value)
+                          if (emotion) {
+                            setPresentationTTSSettings(prev => ({ ...prev, selectedEmotion: emotion }))
+                          }
+                        }}
+                        className="w-full p-2 border border-purple-200 rounded-lg bg-white text-purple-700"
+                      >
+                        {EMOTION_STYLES.map((emotion) => (
+                          <option key={emotion.name} value={emotion.name}>
+                            {emotion.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                )}
+
+                {/* Additional Options */}
+                <div>
+                  <div className="flex items-center space-x-3">
+                    <input
+                      type="checkbox"
+                      id="announceSlideNumbers"
+                      checked={presentationTTSSettings.announceSlideNumbers}
+                      onChange={(e) => setPresentationTTSSettings(prev => ({ 
+                        ...prev, 
+                        announceSlideNumbers: e.target.checked 
+                      }))}
+                      className="w-4 h-4 text-purple-600 bg-gray-100 border-gray-300 rounded focus:ring-purple-500"
+                    />
+                    <label htmlFor="announceSlideNumbers" className="text-sm font-medium text-purple-700 cursor-pointer">
+                      📢 Kondig slide nummers aan ("Slide 1", "Slide 2", etc.)
+                    </label>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Presentation Controls */}
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center space-x-4">
+                {!presentationTTS.isPlaying ? (
+                  <button
+                    onClick={startPresentationTTS}
+                    disabled={!slides.some(slide => slide.script)}
+                    className="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium flex items-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <span>▶️</span>
+                    <span>Start Presentatie</span>
+                  </button>
+                ) : (
+                  <div className="flex items-center space-x-2">
+                    {!presentationTTS.isPaused ? (
+                      <button
+                        onClick={pausePresentationTTS}
+                        className="px-4 py-3 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors font-medium flex items-center space-x-2"
+                      >
+                        <span>⏸️</span>
+                        <span>Pauzeer</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={resumePresentationTTS}
+                        className="px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium flex items-center space-x-2"
+                      >
+                        <span>▶️</span>
+                        <span>Hervat</span>
+                      </button>
+                    )}
+                    
+                    <button
+                      onClick={stopPresentationTTS}
+                      className="px-4 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors font-medium flex items-center space-x-2"
+                    >
+                      <span>⏹️</span>
+                      <span>Stop</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Presentation Status */}
+              <div className="text-right">
+                {presentationTTS.isPlaying && (
+                  <div className="text-sm text-gray-600">
+                    <div className="flex items-center space-x-2">
+                      {presentationTTS.isLoading ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-purple-600 border-t-transparent rounded-full animate-spin"></div>
+                          <span>Genereren...</span>
+                        </>
+                      ) : presentationTTS.isPaused ? (
+                        <>
+                          <span className="w-3 h-3 bg-yellow-500 rounded-full"></span>
+                          <span>Gepauzeerd</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></span>
+                          <span>Speelt af</span>
+                        </>
+                      )}
+                    </div>
+                    <div className="text-xs text-purple-600 mt-1">
+                      Slide {presentationTTS.currentSlide + 1} van {slides.length}
+                    </div>
+                  </div>
+                )}
+                
+                {presentationTTS.error && (
+                  <div className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+                    {presentationTTS.error}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Slide Navigation */}
+            {presentationTTS.isPlaying && (
+              <div className="bg-gray-50 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-medium text-gray-700">Slide Navigatie</h4>
+                  <div className="text-xs text-gray-500">
+                    Klik op een slide om er naartoe te springen
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                  {slides.map((slide, index) => (
+                    <button
+                      key={slide.slideNumber}
+                      onClick={() => jumpToSlide(index)}
+                      className={`p-2 text-xs rounded-lg transition-all duration-200 ${
+                        presentationTTS.currentSlide === index
+                          ? 'bg-green-600 text-white'
+                          : index < presentationTTS.currentSlide
+                          ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      }`}
+                      title={slide.title}
+                    >
+                      <div className="font-medium">Slide {slide.slideNumber}</div>
+                      <div className="truncate">{slide.title.substring(0, 20)}...</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Info Box */}
+            <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <div className="flex items-start space-x-3">
+                <svg className="w-5 h-5 text-blue-600 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div className="text-sm text-blue-800">
+                  <p className="font-medium mb-1">🎤 Presentatie TTS Functionaliteit:</p>
+                  <ul className="space-y-1 text-blue-700">
+                    <li><strong>▶️ Automatisch afspelen:</strong> Alle slides worden achter elkaar voorgelezen</li>
+                    <li><strong>⏸️ Pauzeer/Hervat:</strong> Onderbreek en hervat de presentatie op elk moment</li>
+                    <li><strong>🎯 Slide navigatie:</strong> Spring naar elke slide tijdens het afspelen</li>
+                    <li><strong>🎭 Stemkeuze:</strong> Kies tussen Microsoft TTS of Gemini AI TTS met 30 stemmen</li>
+                    <li><strong>⏱️ Aanpasbare pauzes:</strong> Stel de tijd tussen slides in (1-5 seconden)</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Slides Preview */}
           <div className="bg-white rounded-2xl shadow-xl p-8">
             <h3 className="text-2xl font-bold text-gray-800 mb-6">
@@ -845,10 +1398,17 @@ export default function PowerPointProcessor() {
                   {/* Slide Header */}
                   <div className="flex items-center justify-between mb-6">
                     <h4 className="text-xl font-bold text-gray-800 flex items-center">
-                      <span className="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center text-sm font-bold mr-3">
+                      <span className={`w-8 h-8 text-white rounded-full flex items-center justify-center text-sm font-bold mr-3 ${
+                        presentationTTS.isPlaying && presentationTTS.currentSlide === index
+                          ? 'bg-green-600 animate-pulse'
+                          : 'bg-blue-600'
+                      }`}>
                         {slide.slideNumber}
                       </span>
                       Slide {slide.slideNumber}: {slide.title}
+                      {presentationTTS.isPlaying && presentationTTS.currentSlide === index && (
+                        <span className="ml-3 text-sm text-green-600 font-medium animate-pulse">🔊 SPEELT AF</span>
+                      )}
                     </h4>
                     <div className="flex items-center space-x-2 text-sm text-gray-500">
                       <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded-full">
@@ -885,6 +1445,19 @@ export default function PowerPointProcessor() {
                         
                         {/* Action buttons per slide */}
                         <div className="flex items-center space-x-2">
+                          {/* Individual slide TTS button */}
+                          {slide.script && (
+                            <GeminiTTS
+                              content={slide.script}
+                              isMarkdown={false}
+                              isStreaming={false}
+                              selectedVoice={presentationTTSSettings.selectedVoice}
+                              selectedEmotion={presentationTTSSettings.selectedEmotion}
+                              hideSettings={true}
+                              className=""
+                            />
+                          )}
+                          
                           {/* Length adjustment dropdown */}
                           <div className="relative">
                             <select
@@ -1065,6 +1638,7 @@ export default function PowerPointProcessor() {
                     <li><strong>📄 .txt bestand:</strong> Volledig script als platte tekst voor eenvoudig gebruik</li>
                     <li><strong>📊 Scripts .xlsx:</strong> Alleen de scripts in Excel formaat - elk script op een aparte rij</li>
                     <li><strong>📥 PowerPoint met notities:</strong> Originele PowerPoint met scripts toegevoegd als notities</li>
+                    <li><strong>🎤 Presentatie TTS:</strong> Laat de hele presentatie automatisch voorlezen met pauzes tussen slides</li>
                   </ul>
                 </div>
               </div>

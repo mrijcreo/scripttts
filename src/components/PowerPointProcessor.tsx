@@ -51,7 +51,38 @@ export default function PowerPointProcessor() {
   const [ttsProgress, setTtsProgress] = useState('')
   const [currentTTSSlide, setCurrentTTSSlide] = useState(0)
 
+  // Network status tracking
+  const [networkStatus, setNetworkStatus] = useState<'online' | 'offline' | 'checking'>('online')
+  const [retryCount, setRetryCount] = useState(0)
+
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Check network connectivity
+  const checkNetworkConnectivity = async (): Promise<boolean> => {
+    try {
+      setNetworkStatus('checking')
+      const response = await fetch('/api/health-check', { 
+        method: 'HEAD',
+        cache: 'no-cache'
+      })
+      const isOnline = response.ok
+      setNetworkStatus(isOnline ? 'online' : 'offline')
+      return isOnline
+    } catch (error) {
+      setNetworkStatus('offline')
+      return false
+    }
+  }
+
+  // Auto-check network status on component mount
+  useEffect(() => {
+    checkNetworkConnectivity()
+    
+    // Set up periodic network checks
+    const interval = setInterval(checkNetworkConnectivity, 30000) // Check every 30 seconds
+    
+    return () => clearInterval(interval)
+  }, [])
 
   const handleFileUpload = async (selectedFile: File) => {
     if (!selectedFile.name.toLowerCase().endsWith('.pptx')) {
@@ -102,12 +133,25 @@ export default function PowerPointProcessor() {
   const generateScript = async () => {
     if (slides.length === 0) return
 
+    // Check network connectivity first
+    const isOnline = await checkNetworkConnectivity()
+    if (!isOnline) {
+      setGenerationError(`🌐 Geen internetverbinding gedetecteerd.
+      
+Controleer je verbinding en probeer opnieuw:
+• Zorg dat je apparaat verbonden is met internet
+• Controleer je WiFi of ethernet verbinding
+• Probeer de pagina te vernieuwen`)
+      return
+    }
+
     setIsGenerating(true)
     setGenerationError('')
     setScripts([])
     setFullScript('')
     setScriptMetadata(null)
     setEditingScriptIndex(null)
+    setRetryCount(0)
 
     try {
       console.log('🚀 Starting script generation...')
@@ -131,13 +175,16 @@ export default function PowerPointProcessor() {
         const errorData = await response.json()
         console.error('❌ API error response:', errorData)
         
-        // Enhanced error display with technical details
+        // Enhanced error display with technical details and troubleshooting
         let errorMessage = errorData.error || 'Fout bij het genereren van script'
         if (errorData.details) {
           errorMessage += `\n\nDetails: ${errorData.details}`
         }
         if (errorData.hint) {
           errorMessage += `\n\nSuggestie: ${errorData.hint}`
+        }
+        if (errorData.troubleshooting?.steps) {
+          errorMessage += `\n\nProbleemoplossing stappen:\n${errorData.troubleshooting.steps.map((step: string, index: number) => `${index + 1}. ${step}`).join('\n')}`
         }
         if (errorData.technicalError) {
           errorMessage += `\n\nTechnische fout: ${errorData.technicalError}`
@@ -162,6 +209,7 @@ export default function PowerPointProcessor() {
         setSlides(updatedSlides)
         
         console.log('✅ Script generation successful')
+        setRetryCount(0) // Reset retry count on success
       } else {
         throw new Error('Script generatie gefaald')
       }
@@ -175,12 +223,17 @@ export default function PowerPointProcessor() {
         if (error.message.includes('Netwerkverbinding probleem') || 
             error.message.includes('fetch failed') ||
             error.message.includes('network')) {
-          userFriendlyError = `🌐 Netwerkprobleem: Kan geen verbinding maken met Gemini AI.
+          setRetryCount(prev => prev + 1)
+          userFriendlyError = `🌐 Netwerkprobleem (Poging ${retryCount + 1}): Kan geen verbinding maken met Gemini AI.
           
 Mogelijke oplossingen:
 • Controleer je internetverbinding
-• Probeer het over een paar minuten opnieuw
-• Controleer of je firewall de verbinding blokkeert`
+• Vernieuw de pagina en probeer opnieuw
+• Wacht 2-3 minuten en probeer opnieuw
+• Controleer of je firewall Google APIs blokkeert
+• Controleer Google Cloud Status voor storingen
+
+${retryCount >= 2 ? '⚠️ Meerdere pogingen gefaald. Dit kan een tijdelijke storing zijn bij Google.' : ''}`
         } else if (error.message.includes('API key probleem') || 
                    error.message.includes('401') || 
                    error.message.includes('403')) {
@@ -477,6 +530,22 @@ Oplossingen:
         <p className="text-lg text-blue-700 mb-6">
           Upload je PowerPoint, krijg een professioneel script, en download met TTS microfoon per slide
         </p>
+
+        {/* Network Status Indicator */}
+        <div className={`inline-flex items-center px-3 py-1 rounded-full text-sm ${
+          networkStatus === 'online' ? 'bg-green-100 text-green-800' :
+          networkStatus === 'offline' ? 'bg-red-100 text-red-800' :
+          'bg-yellow-100 text-yellow-800'
+        }`}>
+          <div className={`w-2 h-2 rounded-full mr-2 ${
+            networkStatus === 'online' ? 'bg-green-500' :
+            networkStatus === 'offline' ? 'bg-red-500' :
+            'bg-yellow-500 animate-pulse'
+          }`}></div>
+          {networkStatus === 'online' ? '🟢 Online' :
+           networkStatus === 'offline' ? '🔴 Offline' :
+           '🟡 Controleren...'}
+        </div>
       </div>
 
       {/* File Upload */}
@@ -650,6 +719,21 @@ Oplossingen:
         <div className="mb-8 p-6 bg-gray-50 rounded-xl">
           <h3 className="text-lg font-semibold text-gray-800 mb-4">Script Instellingen</h3>
           
+          {/* Network Warning */}
+          {networkStatus === 'offline' && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+              <div className="flex items-center">
+                <svg className="w-5 h-5 text-red-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="text-red-800 font-medium">Geen internetverbinding</span>
+              </div>
+              <p className="text-red-700 text-sm mt-1">
+                Script generatie vereist een internetverbinding. Controleer je verbinding en probeer opnieuw.
+              </p>
+            </div>
+          )}
+          
           {/* Default Settings Notice */}
           <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
             <div className="flex items-center">
@@ -713,13 +797,20 @@ Oplossingen:
           {/* Generate Script Button */}
           <button
             onClick={generateScript}
-            disabled={isGenerating || slides.length === 0}
+            disabled={isGenerating || slides.length === 0 || networkStatus === 'offline'}
             className="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isGenerating ? (
               <span className="flex items-center justify-center">
                 <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
                 Script wordt gegenereerd...
+              </span>
+            ) : networkStatus === 'offline' ? (
+              <span className="flex items-center justify-center">
+                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192L5.636 18.364M12 2.25a9.75 9.75 0 11-9.75 9.75 9.75 9.75 0 019.75-9.75z" />
+                </svg>
+                🔴 Geen internetverbinding
               </span>
             ) : (
               <span className="flex items-center justify-center">
@@ -741,6 +832,9 @@ Oplossingen:
             <span className="text-blue-800 font-medium">Gemini AI genereert je educatieve script...</span>
           </div>
           <p className="text-blue-700 text-sm mt-2">Beknopte, educatieve scripts met tutoyeren worden gemaakt</p>
+          {retryCount > 0 && (
+            <p className="text-blue-600 text-xs mt-1">Poging {retryCount + 1} - Verbinding wordt opnieuw geprobeerd...</p>
+          )}
         </div>
       )}
 
@@ -756,6 +850,25 @@ Oplossingen:
             {generationError}
           </div>
           
+          {/* Retry Button for Network Errors */}
+          {generationError.includes('Netwerkprobleem') && (
+            <div className="mt-4 flex space-x-2">
+              <button
+                onClick={generateScript}
+                disabled={isGenerating || networkStatus === 'offline'}
+                className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+              >
+                🔄 Probeer Opnieuw
+              </button>
+              <button
+                onClick={checkNetworkConnectivity}
+                className="px-4 py-2 bg-gray-600 text-white text-sm rounded-lg hover:bg-gray-700 transition-colors"
+              >
+                🌐 Test Verbinding
+              </button>
+            </div>
+          )}
+          
           {/* Troubleshooting Tips */}
           <div className="mt-4 p-3 bg-red-100 rounded-lg">
             <h4 className="font-medium text-red-800 mb-2">🔧 Probleemoplossing:</h4>
@@ -765,6 +878,7 @@ Oplossingen:
               <li>• Herstart de development server (npm run dev)</li>
               <li>• Probeer het over een paar minuten opnieuw</li>
               <li>• Controleer je API quota in Google AI Studio</li>
+              <li>• Controleer Google Cloud Status voor storingen</li>
             </ul>
           </div>
         </div>

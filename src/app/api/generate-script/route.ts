@@ -40,9 +40,37 @@ export async function POST(request: NextRequest) {
       }, { status: 400 })
     }
 
-    // Test API connectivity first
+    // Test network connectivity first
+    console.log('Testing network connectivity to Google APIs...')
+    try {
+      const connectivityTest = await fetch('https://www.googleapis.com', {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(10000) // 10 second timeout
+      })
+      console.log('Network connectivity test result:', connectivityTest.status)
+    } catch (connectivityError) {
+      console.error('Network connectivity test failed:', connectivityError)
+      return NextResponse.json(
+        { 
+          error: 'Netwerkverbinding probleem',
+          details: 'Kan geen verbinding maken met Google services. Dit kan een tijdelijk probleem zijn.',
+          hint: 'Controleer je internetverbinding en probeer het over een paar minuten opnieuw.',
+          technicalError: connectivityError instanceof Error ? connectivityError.message : 'Network connectivity failed'
+        },
+        { status: 503 }
+      )
+    }
+
     console.log('Testing Gemini API connectivity...')
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }) // Use more stable model
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-1.5-flash',
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 8192,
+      }
+    })
 
     // Updated length-specific settings
     const lengthSettings: Record<string, { timePerSlide: string; wordCount: string; description: string }> = {
@@ -131,33 +159,55 @@ VOLLEDIG SCRIPT:
 
     console.log('Generating script with Gemini API...')
     
-    // Add timeout and retry logic
-    const generateWithRetry = async (retries = 3): Promise<any> => {
+    // Enhanced retry logic with exponential backoff and better error handling
+    const generateWithRetry = async (retries = 5): Promise<any> => {
       for (let i = 0; i < retries; i++) {
         try {
           console.log(`Attempt ${i + 1}/${retries} to generate content...`)
           
-          // Create a timeout promise
-          const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('Request timeout after 30 seconds')), 30000)
-          })
+          // Create AbortController for timeout
+          const controller = new AbortController()
+          const timeoutId = setTimeout(() => controller.abort(), 45000) // 45 second timeout
           
-          // Race between the API call and timeout
-          const result = await Promise.race([
-            model.generateContent(prompt),
-            timeoutPromise
-          ])
+          try {
+            const result = await model.generateContent(prompt)
+            clearTimeout(timeoutId)
+            return result
+          } catch (error) {
+            clearTimeout(timeoutId)
+            throw error
+          }
           
-          return result
         } catch (error) {
           console.error(`Attempt ${i + 1} failed:`, error)
           
+          // Check if it's the last retry
           if (i === retries - 1) {
             throw error
           }
           
-          // Wait before retry (exponential backoff)
-          await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000))
+          // Enhanced error-specific retry logic
+          if (error instanceof Error) {
+            // For network errors, wait longer between retries
+            if (error.message.includes('fetch failed') || 
+                error.message.includes('network') ||
+                error.message.includes('ENOTFOUND') ||
+                error.message.includes('ECONNREFUSED')) {
+              console.log(`Network error detected, waiting ${Math.pow(2, i + 1) * 2} seconds before retry...`)
+              await new Promise(resolve => setTimeout(resolve, Math.pow(2, i + 1) * 2000))
+            } else if (error.message.includes('429') || 
+                       error.message.includes('quota') ||
+                       error.message.includes('RESOURCE_EXHAUSTED')) {
+              // For rate limiting, wait even longer
+              console.log(`Rate limit detected, waiting ${Math.pow(2, i + 2) * 3} seconds before retry...`)
+              await new Promise(resolve => setTimeout(resolve, Math.pow(2, i + 2) * 3000))
+            } else {
+              // For other errors, standard exponential backoff
+              await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000))
+            }
+          } else {
+            await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000))
+          }
         }
       }
     }
@@ -211,13 +261,29 @@ VOLLEDIG SCRIPT:
           error.message.includes('network') || 
           error.message.includes('ENOTFOUND') ||
           error.message.includes('ECONNREFUSED') ||
-          error.message.includes('timeout')) {
+          error.message.includes('timeout') ||
+          error.message.includes('aborted')) {
         return NextResponse.json(
           { 
             error: 'Netwerkverbinding probleem',
-            details: 'Kan geen verbinding maken met Gemini API. Controleer je internetverbinding.',
-            hint: 'Probeer het opnieuw. Als het probleem aanhoudt, controleer je firewall instellingen.',
-            technicalError: error.message
+            details: 'Kan geen verbinding maken met Gemini API. Dit kan een tijdelijk probleem zijn met je internetverbinding of de Google servers.',
+            hint: 'Probeer het over een paar minuten opnieuw. Als het probleem aanhoudt:\n• Controleer je internetverbinding\n• Controleer of je firewall Google APIs blokkeert\n• Probeer de pagina te vernieuwen\n• Controleer Google Cloud Status voor storingen',
+            technicalError: error.message,
+            troubleshooting: {
+              steps: [
+                'Controleer je internetverbinding',
+                'Vernieuw de pagina en probeer opnieuw',
+                'Controleer Google Cloud Status Dashboard',
+                'Controleer firewall instellingen',
+                'Probeer het over 5-10 minuten opnieuw'
+              ],
+              possibleCauses: [
+                'Tijdelijke netwerkstoring',
+                'Firewall blokkeert Google APIs',
+                'DNS resolutie problemen',
+                'Google API tijdelijk niet beschikbaar'
+              ]
+            }
           },
           { status: 503 }
         )
@@ -283,9 +349,18 @@ VOLLEDIG SCRIPT:
     return NextResponse.json(
       { 
         error: 'Onbekende fout bij script generatie',
-        details: 'Er is een onverwachte fout opgetreden.',
-        hint: 'Probeer het opnieuw. Als het probleem aanhoudt, controleer je API configuratie.',
-        technicalError: error instanceof Error ? error.message : 'Onbekende fout'
+        details: 'Er is een onverwachte fout opgetreden. Dit kan een tijdelijk probleem zijn.',
+        hint: 'Probeer het over een paar minuten opnieuw. Als het probleem aanhoudt, controleer je internetverbinding en API configuratie.',
+        technicalError: error instanceof Error ? error.message : 'Onbekende fout',
+        troubleshooting: {
+          steps: [
+            'Vernieuw de pagina en probeer opnieuw',
+            'Controleer je internetverbinding',
+            'Controleer je GEMINI_API_KEY configuratie',
+            'Herstart de development server',
+            'Probeer het over 5-10 minuten opnieuw'
+          ]
+        }
       },
       { status: 500 }
     )

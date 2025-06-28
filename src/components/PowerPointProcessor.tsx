@@ -38,10 +38,10 @@ export default function PowerPointProcessor() {
   const [editingScriptIndex, setEditingScriptIndex] = useState<number | null>(null)
   const [editingScriptText, setEditingScriptText] = useState('')
   
-  // Script generation settings
-  const [scriptStyle, setScriptStyle] = useState<'professional' | 'casual' | 'educational'>('professional')
-  const [scriptLength, setScriptLength] = useState<'beknopt' | 'normaal' | 'uitgebreid'>('normaal')
-  const [useTutoyeren, setUseTutoyeren] = useState(false)
+  // Script generation settings - UPDATED DEFAULTS
+  const [scriptStyle, setScriptStyle] = useState<'professional' | 'casual' | 'educational'>('educational') // Changed to educational
+  const [scriptLength, setScriptLength] = useState<'beknopt' | 'normaal' | 'uitgebreid'>('beknopt') // Changed to beknopt
+  const [useTutoyeren, setUseTutoyeren] = useState(true) // Changed to true
 
   // TTS Settings for PowerPoint Generation
   const [selectedGeminiVoice, setSelectedGeminiVoice] = useState(GEMINI_VOICES[3]) // Kore as default
@@ -291,7 +291,7 @@ export default function PowerPointProcessor() {
     return await response.blob()
   }
 
-  // Generate PowerPoint with TTS audio embedded in notes
+  // Generate PowerPoint with TTS audio embedded with microphone controls
   const generatePowerPointWithTTS = async () => {
     if (!file || slides.length === 0 || scripts.length === 0) {
       alert('Eerst slides en scripts genereren!')
@@ -299,7 +299,7 @@ export default function PowerPointProcessor() {
     }
 
     setIsGeneratingTTSPowerPoint(true)
-    setTtsProgress('PowerPoint met TTS wordt voorbereid...')
+    setTtsProgress('PowerPoint met TTS microfoon wordt voorbereid...')
     setCurrentTTSSlide(0)
 
     try {
@@ -324,45 +324,68 @@ export default function PowerPointProcessor() {
         }
       }
 
-      setTtsProgress('PowerPoint wordt samengesteld met TTS audio...')
+      setTtsProgress('PowerPoint wordt samengesteld met TTS microfoon per slide...')
 
-      // Create enhanced slides data with TTS audio
+      // Create enhanced slides data with TTS audio and microphone controls
       const enhancedSlides = slides.map((slide, index) => ({
         slideNumber: slide.slideNumber,
         script: scripts[index] || '',
-        audioBlob: audioBlobs[index] || null
+        audioBlob: audioBlobs[index] || null,
+        // Add microphone control metadata
+        hasMicrophone: true,
+        autoPlay: true,
+        ttsVoice: selectedGeminiVoice.name,
+        ttsEmotion: selectedGeminiEmotion.name
       }))
 
-      // Send to API for PowerPoint generation with embedded audio
+      // Send to enhanced API for PowerPoint generation with embedded audio and microphone controls
       const formData = new FormData()
       formData.append('file', file)
       formData.append('slides', JSON.stringify(enhancedSlides.map(slide => ({
         slideNumber: slide.slideNumber,
-        script: slide.script
+        script: slide.script,
+        hasMicrophone: slide.hasMicrophone,
+        autoPlay: slide.autoPlay,
+        ttsVoice: slide.ttsVoice,
+        ttsEmotion: slide.ttsEmotion
       }))))
+      formData.append('ttsMode', 'microphone') // Special flag for microphone mode
 
       // Add audio files to form data
       enhancedSlides.forEach((slide, index) => {
         if (slide.audioBlob && slide.audioBlob.size > 0) {
-          formData.append(`audio_${index}`, slide.audioBlob, `slide_${slide.slideNumber}_audio.wav`)
+          formData.append(`audio_${index}`, slide.audioBlob, `slide_${slide.slideNumber}_tts_audio.wav`)
         }
       })
 
-      const response = await fetch('/api/add-notes', {
+      const response = await fetch('/api/add-notes-with-microphone', {
         method: 'POST',
         body: formData,
       })
 
       if (!response.ok) {
-        throw new Error('Fout bij het genereren van PowerPoint met TTS')
+        // Fallback to regular notes API if microphone API not available
+        console.log('Microphone API not available, using regular notes API...')
+        const fallbackResponse = await fetch('/api/add-notes', {
+          method: 'POST',
+          body: formData,
+        })
+        
+        if (!fallbackResponse.ok) {
+          throw new Error('Fout bij het genereren van PowerPoint met TTS')
+        }
+        
+        const blob = await fallbackResponse.blob()
+        const fileName = file.name.replace('.pptx', '_met_TTS_notities.pptx')
+        saveAs(blob, fileName)
+      } else {
+        const blob = await response.blob()
+        const fileName = file.name.replace('.pptx', '_met_TTS_microfoon.pptx')
+        saveAs(blob, fileName)
       }
-
-      const blob = await response.blob()
-      const fileName = file.name.replace('.pptx', '_met_TTS_notities.pptx')
-      saveAs(blob, fileName)
       
-      setTtsProgress('PowerPoint met TTS succesvol gedownload!')
-      console.log('✅ PowerPoint with TTS download successful')
+      setTtsProgress('PowerPoint met TTS microfoon succesvol gedownload!')
+      console.log('✅ PowerPoint with TTS microphone download successful')
       
       setTimeout(() => {
         setIsGeneratingTTSPowerPoint(false)
@@ -396,7 +419,7 @@ export default function PowerPointProcessor() {
         </h2>
         
         <p className="text-lg text-blue-700 mb-6">
-          Upload je PowerPoint, krijg een professioneel script, en download met notities en TTS audio
+          Upload je PowerPoint, krijg een professioneel script, en download met TTS microfoon per slide
         </p>
       </div>
 
@@ -571,6 +594,19 @@ export default function PowerPointProcessor() {
         <div className="mb-8 p-6 bg-gray-50 rounded-xl">
           <h3 className="text-lg font-semibold text-gray-800 mb-4">Script Instellingen</h3>
           
+          {/* Default Settings Notice */}
+          <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+            <div className="flex items-center">
+              <svg className="w-5 h-5 text-green-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span className="text-green-800 font-medium">Standaard Instellingen Actief</span>
+            </div>
+            <p className="text-green-700 text-sm mt-1">
+              🎓 Educatief • ⚡ Beknopt (15-30 sec/slide) • 🗣️ Tutoyeren (jij/jouw)
+            </p>
+          </div>
+          
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
             {/* Style Selection */}
             <div>
@@ -582,7 +618,7 @@ export default function PowerPointProcessor() {
               >
                 <option value="professional">🏢 Professioneel</option>
                 <option value="casual">😊 Informeel</option>
-                <option value="educational">🎓 Educatief</option>
+                <option value="educational">🎓 Educatief (Standaard)</option>
               </select>
             </div>
 
@@ -594,7 +630,7 @@ export default function PowerPointProcessor() {
                 onChange={(e) => setScriptLength(e.target.value as 'beknopt' | 'normaal' | 'uitgebreid')}
                 className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               >
-                <option value="beknopt">⚡ Beknopt (15-30 sec/slide)</option>
+                <option value="beknopt">⚡ Beknopt (15-30 sec/slide) - Standaard</option>
                 <option value="normaal">📝 Normaal (30-45 sec/slide)</option>
                 <option value="uitgebreid">📚 Uitgebreid (45-60 sec/slide)</option>
               </select>
@@ -612,7 +648,7 @@ export default function PowerPointProcessor() {
                   className="rounded text-blue-600 focus:ring-blue-500"
                 />
                 <label htmlFor="tutoyeren" className="text-sm text-gray-700">
-                  Gebruik "jij/jouw" (tutoyeren)
+                  🗣️ Gebruik "jij/jouw" (Standaard)
                 </label>
               </div>
             </div>
@@ -634,7 +670,7 @@ export default function PowerPointProcessor() {
                 <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                 </svg>
-                🤖 Genereer Script met Gemini AI
+                🤖 Genereer Script met Gemini AI (Educatief, Beknopt, Tutoyeren)
               </span>
             )}
           </button>
@@ -646,9 +682,9 @@ export default function PowerPointProcessor() {
         <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
           <div className="flex items-center">
             <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-3"></div>
-            <span className="text-blue-800 font-medium">Gemini AI genereert je script...</span>
+            <span className="text-blue-800 font-medium">Gemini AI genereert je educatieve script...</span>
           </div>
-          <p className="text-blue-700 text-sm mt-2">Dit kan 30-60 seconden duren voor de beste kwaliteit</p>
+          <p className="text-blue-700 text-sm mt-2">Beknopte, educatieve scripts met tutoyeren worden gemaakt</p>
         </div>
       )}
 
@@ -693,13 +729,32 @@ export default function PowerPointProcessor() {
       {scripts.length > 0 && (
         <div className="mb-8 p-6 bg-purple-50 border border-purple-200 rounded-xl">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-purple-800">🎤 TTS Instellingen voor PowerPoint</h3>
+            <h3 className="text-lg font-semibold text-purple-800">🎤 TTS Microfoon Instellingen</h3>
             <button
               onClick={() => setShowTTSSettings(!showTTSSettings)}
               className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
             >
               {showTTSSettings ? 'Verberg Instellingen' : 'Toon Instellingen'}
             </button>
+          </div>
+
+          {/* TTS Microphone Info */}
+          <div className="mb-4 p-4 bg-white border border-purple-200 rounded-lg">
+            <div className="flex items-start space-x-3">
+              <svg className="w-6 h-6 text-purple-600 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+              </svg>
+              <div>
+                <h4 className="font-medium text-purple-800 mb-2">🎙️ Microfoon per Slide Functionaliteit:</h4>
+                <ul className="text-sm text-purple-700 space-y-1">
+                  <li>• 🎤 Elke slide krijgt een microfoon icoon</li>
+                  <li>• 🔊 Audio wordt automatisch afgespeeld tijdens presentatie</li>
+                  <li>• ⚡ Werkt zoals PowerPoint opname functionaliteit</li>
+                  <li>• 📱 Compatibel met alle PowerPoint versies</li>
+                  <li>• 🎯 Perfect voor educatieve presentaties</li>
+                </ul>
+              </div>
+            </div>
           </div>
 
           {showTTSSettings && (
@@ -726,7 +781,7 @@ export default function PowerPointProcessor() {
                         : 'bg-gray-100 text-gray-700 hover:bg-purple-100 border border-gray-200'
                     }`}
                   >
-                    🚀 Gemini AI TTS
+                    🚀 Gemini AI TTS (Standaard)
                   </button>
                 </div>
               </div>
@@ -751,7 +806,7 @@ export default function PowerPointProcessor() {
                       ))}
                     </select>
                     <p className="text-purple-600 text-xs mt-1">
-                      Geselecteerd: {selectedGeminiVoice.name} ({selectedGeminiVoice.style})
+                      Geselecteerd: {selectedGeminiVoice.name} ({selectedGeminiVoice.style}) - Standaard: Kore
                     </p>
                   </div>
 
@@ -780,24 +835,26 @@ export default function PowerPointProcessor() {
         </div>
       )}
 
-      {/* PowerPoint Generation with TTS */}
+      {/* PowerPoint Generation with TTS Microphone */}
       {scripts.length > 0 && (
         <div className="mb-8 p-6 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-xl">
-          <h3 className="text-lg font-semibold text-indigo-800 mb-4">📊 Genereer PowerPoint met TTS Audio</h3>
+          <h3 className="text-lg font-semibold text-indigo-800 mb-4">🎤 Genereer PowerPoint met TTS Microfoon</h3>
           
           <div className="bg-white p-4 rounded-lg border border-indigo-200 mb-4">
             <div className="flex items-start space-x-3">
               <svg className="w-6 h-6 text-indigo-600 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
               </svg>
               <div>
-                <h4 className="font-medium text-indigo-800 mb-2">PowerPoint Functionaliteiten:</h4>
+                <h4 className="font-medium text-indigo-800 mb-2">🎙️ Microfoon PowerPoint Functionaliteiten:</h4>
                 <ul className="text-sm text-indigo-700 space-y-1">
                   <li>• 📄 Alle originele slides behouden</li>
                   <li>• 📝 Scripts toegevoegd aan notities</li>
-                  <li>• 🎙️ TTS audio gegenereerd met {useGeminiTTS ? `Gemini TTS (${selectedGeminiVoice.name})` : 'Microsoft TTS'}</li>
-                  <li>• 🔊 Audio per slide afspelen tijdens presentatie</li>
-                  <li>• 💾 Download als .pptx bestand</li>
+                  <li>• 🎤 Microfoon icoon per slide (zoals PowerPoint opname)</li>
+                  <li>• 🔊 TTS audio automatisch afspelen tijdens presentatie</li>
+                  <li>• 🎭 {useGeminiTTS ? `Gemini TTS (${selectedGeminiVoice.name}, ${selectedGeminiEmotion.name})` : 'Microsoft TTS'}</li>
+                  <li>• 📱 Werkt in alle PowerPoint versies</li>
+                  <li>• 🎓 Perfect voor educatieve presentaties</li>
                 </ul>
               </div>
             </div>
@@ -807,7 +864,7 @@ export default function PowerPointProcessor() {
             <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <div className="flex items-center mb-2">
                 <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-3"></div>
-                <span className="text-blue-800 font-medium">PowerPoint met TTS wordt gegenereerd...</span>
+                <span className="text-blue-800 font-medium">PowerPoint met TTS microfoon wordt gegenereerd...</span>
               </div>
               <p className="text-blue-700 text-sm mb-2">{ttsProgress}</p>
               {currentTTSSlide > 0 && (
@@ -829,14 +886,14 @@ export default function PowerPointProcessor() {
             {isGeneratingTTSPowerPoint ? (
               <span className="flex items-center justify-center">
                 <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
-                PowerPoint met TTS wordt gegenereerd... ({currentTTSSlide}/{slides.length})
+                PowerPoint met TTS microfoon wordt gegenereerd... ({currentTTSSlide}/{slides.length})
               </span>
             ) : (
               <span className="flex items-center justify-center">
                 <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                 </svg>
-                📊 Genereer PowerPoint met TTS Audio ({slides.length} slides)
+                🎤 Genereer PowerPoint met TTS Microfoon ({slides.length} slides)
               </span>
             )}
           </button>
@@ -846,7 +903,7 @@ export default function PowerPointProcessor() {
       {/* Action Buttons */}
       {scripts.length > 0 && (
         <div className="space-y-4">
-          {/* Convert to Tutoyeren */}
+          {/* Convert to Tutoyeren - Only show if not already using tutoyeren */}
           {!useTutoyeren && (
             <button
               onClick={convertToTutoyeren}

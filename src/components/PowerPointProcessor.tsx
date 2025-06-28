@@ -34,6 +34,10 @@ export default function PowerPointProcessor() {
   const [generationError, setGenerationError] = useState('')
   const [scriptMetadata, setScriptMetadata] = useState<ScriptMetadata | null>(null)
   
+  // Script editing state
+  const [editingScriptIndex, setEditingScriptIndex] = useState<number | null>(null)
+  const [editingScriptText, setEditingScriptText] = useState('')
+  
   // Script generation settings
   const [scriptStyle, setScriptStyle] = useState<'professional' | 'casual' | 'educational'>('professional')
   const [scriptLength, setScriptLength] = useState<'beknopt' | 'normaal' | 'uitgebreid'>('normaal')
@@ -68,6 +72,7 @@ export default function PowerPointProcessor() {
     setExtractionError('')
     setGenerationError('')
     setScriptMetadata(null)
+    setEditingScriptIndex(null)
     setIsExtracting(true)
 
     try {
@@ -108,6 +113,7 @@ export default function PowerPointProcessor() {
     setScripts([])
     setFullScript('')
     setScriptMetadata(null)
+    setEditingScriptIndex(null)
 
     try {
       const response = await fetch('/api/generate-script', {
@@ -202,6 +208,38 @@ export default function PowerPointProcessor() {
     } finally {
       setIsConverting(false)
     }
+  }
+
+  // Script editing functions
+  const startEditingScript = (index: number) => {
+    setEditingScriptIndex(index)
+    setEditingScriptText(scripts[index] || '')
+  }
+
+  const saveEditedScript = () => {
+    if (editingScriptIndex !== null) {
+      const updatedScripts = [...scripts]
+      updatedScripts[editingScriptIndex] = editingScriptText
+      setScripts(updatedScripts)
+      
+      // Update slides with edited script
+      const updatedSlides = slides.map((slide, index) => ({
+        ...slide,
+        script: index === editingScriptIndex ? editingScriptText : slide.script
+      }))
+      setSlides(updatedSlides)
+      
+      // Update full script
+      setFullScript(updatedScripts.join('\n\n'))
+      
+      setEditingScriptIndex(null)
+      setEditingScriptText('')
+    }
+  }
+
+  const cancelEditingScript = () => {
+    setEditingScriptIndex(null)
+    setEditingScriptText('')
   }
 
   const downloadWithNotes = async () => {
@@ -548,13 +586,18 @@ export default function PowerPointProcessor() {
         </div>
       )}
 
-      {/* Slides Preview */}
+      {/* Slides with Scripts Preview */}
       {slides.length > 0 && (
         <div className="mb-8">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-xl font-semibold text-gray-800">
-              Geëxtraheerde Slides ({slides.length})
+              {scripts.length > 0 ? `Scripts per Slide (${slides.length})` : `Geëxtraheerde Slides (${slides.length})`}
             </h3>
+            {scripts.length > 0 && (
+              <div className="text-sm text-gray-600">
+                💡 Klik op "Bewerken" om een script aan te passen
+              </div>
+            )}
           </div>
           
           <div className="grid gap-4 max-h-96 overflow-y-auto">
@@ -564,17 +607,69 @@ export default function PowerPointProcessor() {
                   <h4 className="font-semibold text-gray-800 line-clamp-1">
                     Slide {slide.slideNumber}: {slide.title}
                   </h4>
+                  {scripts.length > 0 && (
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs text-gray-500">
+                        {scripts[index]?.split(' ').length || 0} woorden
+                      </span>
+                      <button
+                        onClick={() => startEditingScript(index)}
+                        className="px-3 py-1 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700 transition-colors"
+                      >
+                        ✏️ Bewerken
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <p className="text-gray-600 text-sm line-clamp-3 mb-3">
-                  {slide.content}
-                </p>
                 
-                {slide.script && (
+                {/* Show slide content only if no scripts generated yet */}
+                {scripts.length === 0 && (
+                  <p className="text-gray-600 text-sm line-clamp-3 mb-3">
+                    {slide.content}
+                  </p>
+                )}
+                
+                {/* Show script if available */}
+                {scripts.length > 0 && (
                   <div className="script-section">
-                    <h5 className="font-medium text-blue-800 mb-2">📝 Gegenereerd Script:</h5>
-                    <p className="text-gray-700 text-sm leading-relaxed">
-                      {slide.script}
-                    </p>
+                    {editingScriptIndex === index ? (
+                      // Edit mode
+                      <div className="space-y-3">
+                        <h5 className="font-medium text-blue-800 mb-2">✏️ Script Bewerken:</h5>
+                        <textarea
+                          value={editingScriptText}
+                          onChange={(e) => setEditingScriptText(e.target.value)}
+                          className="w-full p-3 border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                          rows={6}
+                          placeholder="Bewerk het script voor deze slide..."
+                        />
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={saveEditedScript}
+                            className="px-4 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 transition-colors"
+                          >
+                            ✅ Opslaan
+                          </button>
+                          <button
+                            onClick={cancelEditingScript}
+                            className="px-4 py-2 bg-gray-500 text-white text-sm rounded-lg hover:bg-gray-600 transition-colors"
+                          >
+                            ❌ Annuleren
+                          </button>
+                          <span className="text-xs text-gray-500 ml-auto">
+                            {editingScriptText.split(' ').length} woorden
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      // View mode
+                      <div>
+                        <h5 className="font-medium text-blue-800 mb-2">📝 Gegenereerd Script:</h5>
+                        <p className="text-gray-700 text-sm leading-relaxed whitespace-pre-wrap">
+                          {scripts[index] || 'Geen script beschikbaar'}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -584,7 +679,7 @@ export default function PowerPointProcessor() {
       )}
 
       {/* Script Generation Settings */}
-      {slides.length > 0 && (
+      {slides.length > 0 && scripts.length === 0 && (
         <div className="mb-8 p-6 bg-gray-50 rounded-xl">
           <h3 className="text-lg font-semibold text-gray-800 mb-4">Script Instellingen</h3>
           

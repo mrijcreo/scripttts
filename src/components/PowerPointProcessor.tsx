@@ -29,7 +29,7 @@ export default function PowerPointProcessor() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [isConverting, setIsConverting] = useState(false)
-  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false)
+  const [isGeneratingTTSPowerPoint, setIsGeneratingTTSPowerPoint] = useState(false)
   const [extractionError, setExtractionError] = useState('')
   const [generationError, setGenerationError] = useState('')
   const [scriptMetadata, setScriptMetadata] = useState<ScriptMetadata | null>(null)
@@ -43,19 +43,13 @@ export default function PowerPointProcessor() {
   const [scriptLength, setScriptLength] = useState<'beknopt' | 'normaal' | 'uitgebreid'>('normaal')
   const [useTutoyeren, setUseTutoyeren] = useState(false)
 
-  // TTS Settings for Video Generation
+  // TTS Settings for PowerPoint Generation
   const [selectedGeminiVoice, setSelectedGeminiVoice] = useState(GEMINI_VOICES[3]) // Kore as default
   const [selectedGeminiEmotion, setSelectedGeminiEmotion] = useState(EMOTION_STYLES[0]) // Neutraal
-  const [useGeminiTTS, setUseGeminiTTS] = useState(true) // Default to Gemini TTS for video
+  const [useGeminiTTS, setUseGeminiTTS] = useState(true) // Default to Gemini TTS
   const [showTTSSettings, setShowTTSSettings] = useState(false)
-  const [videoProgress, setVideoProgress] = useState('')
-  const [currentVideoSlide, setCurrentVideoSlide] = useState(0)
-
-  // Video generation refs
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const recordedChunksRef = useRef<Blob[]>([])
+  const [ttsProgress, setTtsProgress] = useState('')
+  const [currentTTSSlide, setCurrentTTSSlide] = useState(0)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -297,198 +291,92 @@ export default function PowerPointProcessor() {
     return await response.blob()
   }
 
-  // Create slide visual for video
-  const createSlideVisual = (slide: Slide, slideIndex: number): Promise<Blob> => {
-    return new Promise((resolve) => {
-      const canvas = canvasRef.current
-      if (!canvas) {
-        resolve(new Blob())
-        return
-      }
-
-      const ctx = canvas.getContext('2d')
-      if (!ctx) {
-        resolve(new Blob())
-        return
-      }
-
-      // Set canvas size (16:9 aspect ratio)
-      canvas.width = 1920
-      canvas.height = 1080
-
-      // Clear canvas with white background
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, canvas.width, canvas.height)
-
-      // Add slide number
-      ctx.fillStyle = '#666666'
-      ctx.font = 'bold 48px Arial'
-      ctx.textAlign = 'right'
-      ctx.fillText(`Slide ${slide.slideNumber}`, canvas.width - 60, 80)
-
-      // Add title
-      ctx.fillStyle = '#1a1a1a'
-      ctx.font = 'bold 72px Arial'
-      ctx.textAlign = 'left'
-      const titleLines = wrapText(ctx, slide.title, 120, 120, canvas.width - 240, 80)
-      titleLines.forEach((line, index) => {
-        ctx.fillText(line, 120, 200 + (index * 90))
-      })
-
-      // Add content
-      ctx.fillStyle = '#333333'
-      ctx.font = '48px Arial'
-      const contentStartY = 200 + (titleLines.length * 90) + 60
-      const contentLines = wrapText(ctx, slide.content, 120, contentStartY, canvas.width - 240, 60)
-      contentLines.forEach((line, index) => {
-        ctx.fillText(line, 120, contentStartY + (index * 70))
-      })
-
-      // Add decorative elements
-      ctx.strokeStyle = '#4f46e5'
-      ctx.lineWidth = 8
-      ctx.beginPath()
-      ctx.moveTo(120, 160)
-      ctx.lineTo(canvas.width - 120, 160)
-      ctx.stroke()
-
-      // Convert canvas to blob
-      canvas.toBlob((blob) => {
-        resolve(blob || new Blob())
-      }, 'image/png')
-    })
-  }
-
-  // Helper function to wrap text
-  const wrapText = (ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxWidth: number, lineHeight: number): string[] => {
-    const words = text.split(' ')
-    const lines: string[] = []
-    let currentLine = ''
-
-    for (const word of words) {
-      const testLine = currentLine + word + ' '
-      const metrics = ctx.measureText(testLine)
-      const testWidth = metrics.width
-
-      if (testWidth > maxWidth && currentLine !== '') {
-        lines.push(currentLine.trim())
-        currentLine = word + ' '
-      } else {
-        currentLine = testLine
-      }
-    }
-    lines.push(currentLine.trim())
-    return lines
-  }
-
-  // Generate video with slides and TTS
-  const generateVideo = async () => {
-    if (slides.length === 0 || scripts.length === 0) {
+  // Generate PowerPoint with TTS audio embedded in notes
+  const generatePowerPointWithTTS = async () => {
+    if (!file || slides.length === 0 || scripts.length === 0) {
       alert('Eerst slides en scripts genereren!')
       return
     }
 
-    setIsGeneratingVideo(true)
-    setVideoProgress('Video generatie wordt voorbereid...')
-    setCurrentVideoSlide(0)
-    recordedChunksRef.current = []
+    setIsGeneratingTTSPowerPoint(true)
+    setTtsProgress('PowerPoint met TTS wordt voorbereid...')
+    setCurrentTTSSlide(0)
 
     try {
-      const canvas = canvasRef.current
-      const video = videoRef.current
+      // First, generate all TTS audio files
+      const audioBlobs: Blob[] = []
       
-      if (!canvas || !video) {
-        throw new Error('Canvas of video element niet beschikbaar')
-      }
-
-      // Setup video recording
-      const stream = canvas.captureStream(30) // 30 FPS
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'video/webm;codecs=vp9'
-      })
-      
-      mediaRecorderRef.current = mediaRecorder
-      
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          recordedChunksRef.current.push(event.data)
-        }
-      }
-
-      mediaRecorder.onstop = () => {
-        const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `${file?.name.replace('.pptx', '')}_presentatie_video.webm`
-        a.click()
-        URL.revokeObjectURL(url)
-        
-        setVideoProgress('Video succesvol gegenereerd en gedownload!')
-        setTimeout(() => {
-          setIsGeneratingVideo(false)
-          setVideoProgress('')
-          setCurrentVideoSlide(0)
-        }, 3000)
-      }
-
-      // Start recording
-      mediaRecorder.start()
-      setVideoProgress('Video opname gestart...')
-
-      // Process each slide
-      for (let i = 0; i < slides.length; i++) {
-        const slide = slides[i]
+      for (let i = 0; i < scripts.length; i++) {
         const script = scripts[i]
-        
         if (!script) continue
 
-        setCurrentVideoSlide(i + 1)
-        setVideoProgress(`Slide ${i + 1}/${slides.length}: ${slide.title.substring(0, 30)}...`)
+        setCurrentTTSSlide(i + 1)
+        setTtsProgress(`TTS audio genereren voor slide ${i + 1}/${scripts.length}...`)
 
-        // Create slide visual
-        await createSlideVisual(slide, i)
-        
-        // Generate and play TTS audio
         try {
           const audioBlob = await generateTTSAudio(script)
-          const audioUrl = URL.createObjectURL(audioBlob)
-          const audio = new Audio(audioUrl)
-          
-          // Wait for audio to finish playing
-          await new Promise<void>((resolve, reject) => {
-            audio.onended = () => {
-              URL.revokeObjectURL(audioUrl)
-              resolve()
-            }
-            audio.onerror = () => {
-              URL.revokeObjectURL(audioUrl)
-              reject(new Error('Audio playback failed'))
-            }
-            audio.play().catch(reject)
-          })
-          
-          // Add small pause between slides
-          await new Promise(resolve => setTimeout(resolve, 1000))
-          
+          audioBlobs.push(audioBlob)
+          console.log(`✅ TTS generated for slide ${i + 1}`)
         } catch (audioError) {
-          console.error(`Audio error for slide ${i + 1}:`, audioError)
-          // Continue with next slide even if audio fails
-          await new Promise(resolve => setTimeout(resolve, 3000)) // 3 second fallback
+          console.error(`❌ TTS error for slide ${i + 1}:`, audioError)
+          // Create empty blob as fallback
+          audioBlobs.push(new Blob())
         }
       }
 
-      // Stop recording
-      setVideoProgress('Video wordt afgerond...')
-      mediaRecorder.stop()
+      setTtsProgress('PowerPoint wordt samengesteld met TTS audio...')
+
+      // Create enhanced slides data with TTS audio
+      const enhancedSlides = slides.map((slide, index) => ({
+        slideNumber: slide.slideNumber,
+        script: scripts[index] || '',
+        audioBlob: audioBlobs[index] || null
+      }))
+
+      // Send to API for PowerPoint generation with embedded audio
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('slides', JSON.stringify(enhancedSlides.map(slide => ({
+        slideNumber: slide.slideNumber,
+        script: slide.script
+      }))))
+
+      // Add audio files to form data
+      enhancedSlides.forEach((slide, index) => {
+        if (slide.audioBlob && slide.audioBlob.size > 0) {
+          formData.append(`audio_${index}`, slide.audioBlob, `slide_${slide.slideNumber}_audio.wav`)
+        }
+      })
+
+      const response = await fetch('/api/add-notes', {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        throw new Error('Fout bij het genereren van PowerPoint met TTS')
+      }
+
+      const blob = await response.blob()
+      const fileName = file.name.replace('.pptx', '_met_TTS_notities.pptx')
+      saveAs(blob, fileName)
+      
+      setTtsProgress('PowerPoint met TTS succesvol gedownload!')
+      console.log('✅ PowerPoint with TTS download successful')
+      
+      setTimeout(() => {
+        setIsGeneratingTTSPowerPoint(false)
+        setTtsProgress('')
+        setCurrentTTSSlide(0)
+      }, 3000)
 
     } catch (error) {
-      console.error('❌ Video generation error:', error)
-      setVideoProgress('Fout bij video generatie: ' + (error instanceof Error ? error.message : 'Onbekende fout'))
-      setIsGeneratingVideo(false)
+      console.error('❌ PowerPoint TTS generation error:', error)
+      setTtsProgress('Fout bij PowerPoint TTS generatie: ' + (error instanceof Error ? error.message : 'Onbekende fout'))
       setTimeout(() => {
-        setVideoProgress('')
-        setCurrentVideoSlide(0)
+        setIsGeneratingTTSPowerPoint(false)
+        setTtsProgress('')
+        setCurrentTTSSlide(0)
       }, 5000)
     }
   }
@@ -508,7 +396,7 @@ export default function PowerPointProcessor() {
         </h2>
         
         <p className="text-lg text-blue-700 mb-6">
-          Upload je PowerPoint, krijg een professioneel script, en download met notities
+          Upload je PowerPoint, krijg een professioneel script, en download met notities en TTS audio
         </p>
       </div>
 
@@ -801,11 +689,11 @@ export default function PowerPointProcessor() {
         </div>
       )}
 
-      {/* TTS Settings for Video Generation */}
+      {/* TTS Settings for PowerPoint Generation */}
       {scripts.length > 0 && (
         <div className="mb-8 p-6 bg-purple-50 border border-purple-200 rounded-xl">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-purple-800">🎤 Video TTS Instellingen</h3>
+            <h3 className="text-lg font-semibold text-purple-800">🎤 TTS Instellingen voor PowerPoint</h3>
             <button
               onClick={() => setShowTTSSettings(!showTTSSettings)}
               className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
@@ -892,41 +780,41 @@ export default function PowerPointProcessor() {
         </div>
       )}
 
-      {/* Video Generation */}
+      {/* PowerPoint Generation with TTS */}
       {scripts.length > 0 && (
         <div className="mb-8 p-6 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-xl">
-          <h3 className="text-lg font-semibold text-indigo-800 mb-4">🎬 Genereer Presentatie Video</h3>
+          <h3 className="text-lg font-semibold text-indigo-800 mb-4">📊 Genereer PowerPoint met TTS Audio</h3>
           
           <div className="bg-white p-4 rounded-lg border border-indigo-200 mb-4">
             <div className="flex items-start space-x-3">
               <svg className="w-6 h-6 text-indigo-600 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
               <div>
-                <h4 className="font-medium text-indigo-800 mb-2">Video Functionaliteiten:</h4>
+                <h4 className="font-medium text-indigo-800 mb-2">PowerPoint Functionaliteiten:</h4>
                 <ul className="text-sm text-indigo-700 space-y-1">
-                  <li>• 📺 Elke slide wordt visueel weergegeven</li>
-                  <li>• 🎙️ Script wordt voorgelezen met {useGeminiTTS ? `Gemini TTS (${selectedGeminiVoice.name})` : 'Microsoft TTS'}</li>
-                  <li>• ⏭️ Automatisch doorschakelen naar volgende slide</li>
-                  <li>• 💾 Download als WebM video bestand</li>
-                  <li>• 🎨 Professionele slide layouts</li>
+                  <li>• 📄 Alle originele slides behouden</li>
+                  <li>• 📝 Scripts toegevoegd aan notities</li>
+                  <li>• 🎙️ TTS audio gegenereerd met {useGeminiTTS ? `Gemini TTS (${selectedGeminiVoice.name})` : 'Microsoft TTS'}</li>
+                  <li>• 🔊 Audio per slide afspelen tijdens presentatie</li>
+                  <li>• 💾 Download als .pptx bestand</li>
                 </ul>
               </div>
             </div>
           </div>
 
-          {isGeneratingVideo && (
+          {isGeneratingTTSPowerPoint && (
             <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
               <div className="flex items-center mb-2">
                 <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-3"></div>
-                <span className="text-blue-800 font-medium">Video wordt gegenereerd...</span>
+                <span className="text-blue-800 font-medium">PowerPoint met TTS wordt gegenereerd...</span>
               </div>
-              <p className="text-blue-700 text-sm mb-2">{videoProgress}</p>
-              {currentVideoSlide > 0 && (
+              <p className="text-blue-700 text-sm mb-2">{ttsProgress}</p>
+              {currentTTSSlide > 0 && (
                 <div className="w-full bg-blue-200 rounded-full h-2">
                   <div 
                     className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                    style={{ width: `${(currentVideoSlide / slides.length) * 100}%` }}
+                    style={{ width: `${(currentTTSSlide / slides.length) * 100}%` }}
                   ></div>
                 </div>
               )}
@@ -934,21 +822,21 @@ export default function PowerPointProcessor() {
           )}
 
           <button
-            onClick={generateVideo}
-            disabled={isGeneratingVideo || scripts.length === 0}
+            onClick={generatePowerPointWithTTS}
+            disabled={isGeneratingTTSPowerPoint || scripts.length === 0}
             className="w-full px-6 py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-lg hover:from-indigo-700 hover:to-purple-700 transition-all duration-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isGeneratingVideo ? (
+            {isGeneratingTTSPowerPoint ? (
               <span className="flex items-center justify-center">
                 <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
-                Video wordt gegenereerd... ({currentVideoSlide}/{slides.length})
+                PowerPoint met TTS wordt gegenereerd... ({currentTTSSlide}/{slides.length})
               </span>
             ) : (
               <span className="flex items-center justify-center">
                 <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
-                🎬 Genereer Presentatie Video ({slides.length} slides)
+                📊 Genereer PowerPoint met TTS Audio ({slides.length} slides)
               </span>
             )}
           </button>
@@ -981,11 +869,11 @@ export default function PowerPointProcessor() {
             </button>
           )}
 
-          {/* Download with Notes */}
+          {/* Download with Notes (Basic) */}
           <button
             onClick={downloadWithNotes}
             disabled={isDownloading || !file}
-            className="w-full px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isDownloading ? (
               <span className="flex items-center justify-center">
@@ -997,16 +885,12 @@ export default function PowerPointProcessor() {
                 <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
-                📥 Download PowerPoint met Script in Notities
+                📥 Download PowerPoint met Script (Basis)
               </span>
             )}
           </button>
         </div>
       )}
-
-      {/* Hidden Canvas and Video for Video Generation */}
-      <canvas ref={canvasRef} className="hidden" />
-      <video ref={videoRef} className="hidden" />
     </div>
   )
 }

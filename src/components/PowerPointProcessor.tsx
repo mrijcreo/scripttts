@@ -110,6 +110,8 @@ export default function PowerPointProcessor() {
     setEditingScriptIndex(null)
 
     try {
+      console.log('🚀 Starting script generation...')
+      
       const response = await fetch('/api/generate-script', {
         method: 'POST',
         headers: {
@@ -123,12 +125,29 @@ export default function PowerPointProcessor() {
         }),
       })
 
+      console.log('📡 API response status:', response.status)
+
       if (!response.ok) {
         const errorData = await response.json()
-        throw new Error(errorData.error || 'Fout bij het genereren van script')
+        console.error('❌ API error response:', errorData)
+        
+        // Enhanced error display with technical details
+        let errorMessage = errorData.error || 'Fout bij het genereren van script'
+        if (errorData.details) {
+          errorMessage += `\n\nDetails: ${errorData.details}`
+        }
+        if (errorData.hint) {
+          errorMessage += `\n\nSuggestie: ${errorData.hint}`
+        }
+        if (errorData.technicalError) {
+          errorMessage += `\n\nTechnische fout: ${errorData.technicalError}`
+        }
+        
+        throw new Error(errorMessage)
       }
 
       const data = await response.json()
+      console.log('✅ API response data:', data)
       
       if (data.success) {
         setScripts(data.scripts)
@@ -148,7 +167,44 @@ export default function PowerPointProcessor() {
       }
     } catch (error) {
       console.error('❌ Script generation error:', error)
-      setGenerationError(error instanceof Error ? error.message : 'Onbekende fout bij script generatie')
+      
+      // Enhanced error handling for user display
+      let userFriendlyError = 'Onbekende fout bij script generatie'
+      
+      if (error instanceof Error) {
+        if (error.message.includes('Netwerkverbinding probleem') || 
+            error.message.includes('fetch failed') ||
+            error.message.includes('network')) {
+          userFriendlyError = `🌐 Netwerkprobleem: Kan geen verbinding maken met Gemini AI.
+          
+Mogelijke oplossingen:
+• Controleer je internetverbinding
+• Probeer het over een paar minuten opnieuw
+• Controleer of je firewall de verbinding blokkeert`
+        } else if (error.message.includes('API key probleem') || 
+                   error.message.includes('401') || 
+                   error.message.includes('403')) {
+          userFriendlyError = `🔑 API Key probleem: Je Gemini API key is ongeldig.
+          
+Oplossingen:
+• Controleer je GEMINI_API_KEY in .env.local
+• Zorg dat de key begint met 'AIza'
+• Herstart de development server (npm run dev)
+• Genereer een nieuwe key in Google AI Studio`
+        } else if (error.message.includes('quota') || 
+                   error.message.includes('429')) {
+          userFriendlyError = `📊 Quota bereikt: Je hebt je dagelijkse API limiet bereikt.
+          
+Oplossingen:
+• Wacht tot morgen voor gratis quota reset
+• Upgrade je plan in Google AI Studio
+• Gebruik een andere API key`
+        } else {
+          userFriendlyError = error.message
+        }
+      }
+      
+      setGenerationError(userFriendlyError)
     } finally {
       setIsGenerating(false)
     }
@@ -690,13 +746,27 @@ export default function PowerPointProcessor() {
 
       {generationError && (
         <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
-          <div className="flex items-center">
+          <div className="flex items-center mb-2">
             <svg className="w-5 h-5 text-red-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             <span className="text-red-800 font-medium">Script Generatie Fout</span>
           </div>
-          <p className="text-red-700 text-sm mt-1">{generationError}</p>
+          <div className="text-red-700 text-sm whitespace-pre-line">
+            {generationError}
+          </div>
+          
+          {/* Troubleshooting Tips */}
+          <div className="mt-4 p-3 bg-red-100 rounded-lg">
+            <h4 className="font-medium text-red-800 mb-2">🔧 Probleemoplossing:</h4>
+            <ul className="text-red-700 text-sm space-y-1">
+              <li>• Controleer je internetverbinding</li>
+              <li>• Verifieer je GEMINI_API_KEY in .env.local</li>
+              <li>• Herstart de development server (npm run dev)</li>
+              <li>• Probeer het over een paar minuten opnieuw</li>
+              <li>• Controleer je API quota in Google AI Studio</li>
+            </ul>
+          </div>
         </div>
       )}
 

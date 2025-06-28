@@ -40,7 +40,9 @@ export async function POST(request: NextRequest) {
       }, { status: 400 })
     }
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
+    // Test API connectivity first
+    console.log('Testing Gemini API connectivity...')
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }) // Use more stable model
 
     // Updated length-specific settings
     const lengthSettings: Record<string, { timePerSlide: string; wordCount: string; description: string }> = {
@@ -128,7 +130,39 @@ VOLLEDIG SCRIPT:
 `
 
     console.log('Generating script with Gemini API...')
-    const result = await model.generateContent(prompt)
+    
+    // Add timeout and retry logic
+    const generateWithRetry = async (retries = 3): Promise<any> => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          console.log(`Attempt ${i + 1}/${retries} to generate content...`)
+          
+          // Create a timeout promise
+          const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Request timeout after 30 seconds')), 30000)
+          })
+          
+          // Race between the API call and timeout
+          const result = await Promise.race([
+            model.generateContent(prompt),
+            timeoutPromise
+          ])
+          
+          return result
+        } catch (error) {
+          console.error(`Attempt ${i + 1} failed:`, error)
+          
+          if (i === retries - 1) {
+            throw error
+          }
+          
+          // Wait before retry (exponential backoff)
+          await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000))
+        }
+      }
+    }
+
+    const result = await generateWithRetry()
     const response = await result.response
     const scriptText = response.text()
 
@@ -172,45 +206,86 @@ VOLLEDIG SCRIPT:
     
     // Enhanced error handling with specific error types
     if (error instanceof Error) {
-      if (error.message.includes('API key')) {
+      // Network/connectivity errors
+      if (error.message.includes('fetch failed') || 
+          error.message.includes('network') || 
+          error.message.includes('ENOTFOUND') ||
+          error.message.includes('ECONNREFUSED') ||
+          error.message.includes('timeout')) {
+        return NextResponse.json(
+          { 
+            error: 'Netwerkverbinding probleem',
+            details: 'Kan geen verbinding maken met Gemini API. Controleer je internetverbinding.',
+            hint: 'Probeer het opnieuw. Als het probleem aanhoudt, controleer je firewall instellingen.',
+            technicalError: error.message
+          },
+          { status: 503 }
+        )
+      }
+      
+      // API key errors
+      if (error.message.includes('API key') || error.message.includes('401') || error.message.includes('403')) {
         return NextResponse.json(
           { 
             error: 'API key probleem',
-            details: error.message,
-            hint: 'Controleer je GEMINI_API_KEY in .env.local'
+            details: 'Je Gemini API key is ongeldig of heeft geen toegang.',
+            hint: 'Controleer je GEMINI_API_KEY in .env.local en herstart de server.',
+            technicalError: error.message
           },
           { status: 401 }
         )
       }
       
-      if (error.message.includes('quota') || error.message.includes('limit')) {
+      // Quota/rate limit errors
+      if (error.message.includes('quota') || 
+          error.message.includes('limit') || 
+          error.message.includes('429') ||
+          error.message.includes('RESOURCE_EXHAUSTED')) {
         return NextResponse.json(
           { 
             error: 'API quota bereikt',
-            details: 'Je hebt je API limiet bereikt',
-            hint: 'Wacht even of upgrade je Gemini API plan'
+            details: 'Je hebt je Gemini API limiet bereikt voor vandaag.',
+            hint: 'Wacht tot morgen of upgrade je Gemini API plan in Google AI Studio.',
+            technicalError: error.message
           },
           { status: 429 }
         )
       }
       
-      if (error.message.includes('network') || error.message.includes('fetch')) {
+      // Model errors
+      if (error.message.includes('model') || error.message.includes('404')) {
         return NextResponse.json(
           { 
-            error: 'Netwerkfout',
-            details: 'Kan geen verbinding maken met Gemini API',
-            hint: 'Controleer je internetverbinding'
+            error: 'Model niet beschikbaar',
+            details: 'Het Gemini model is tijdelijk niet beschikbaar.',
+            hint: 'Probeer het over een paar minuten opnieuw.',
+            technicalError: error.message
           },
           { status: 503 }
         )
       }
+      
+      // Content policy errors
+      if (error.message.includes('SAFETY') || error.message.includes('blocked')) {
+        return NextResponse.json(
+          { 
+            error: 'Inhoud geblokkeerd',
+            details: 'De slide inhoud werd geblokkeerd door veiligheidsfilters.',
+            hint: 'Controleer je slide inhoud op mogelijk problematische tekst.',
+            technicalError: error.message
+          },
+          { status: 400 }
+        )
+      }
     }
     
+    // Generic error fallback
     return NextResponse.json(
       { 
-        error: 'Fout bij het genereren van script',
-        details: error instanceof Error ? error.message : 'Onbekende fout',
-        hint: 'Probeer het opnieuw of controleer je API configuratie'
+        error: 'Onbekende fout bij script generatie',
+        details: 'Er is een onverwachte fout opgetreden.',
+        hint: 'Probeer het opnieuw. Als het probleem aanhoudt, controleer je API configuratie.',
+        technicalError: error instanceof Error ? error.message : 'Onbekende fout'
       },
       { status: 500 }
     )

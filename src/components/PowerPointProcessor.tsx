@@ -50,6 +50,7 @@ export default function PowerPointProcessor() {
   const [showTTSSettings, setShowTTSSettings] = useState(false)
   const [ttsProgress, setTtsProgress] = useState('')
   const [currentTTSSlide, setCurrentTTSSlide] = useState(0)
+  const [ttsErrors, setTtsErrors] = useState<string[]>([])
 
   // Network status tracking
   const [networkStatus, setNetworkStatus] = useState<'online' | 'offline' | 'checking'>('online')
@@ -380,24 +381,72 @@ Oplossingen:
     }
   }
 
-  // Generate TTS audio for a specific text
-  const generateTTSAudio = async (text: string): Promise<Blob> => {
-    const response = await fetch('/api/generate-tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: text,
-        voiceName: selectedGeminiVoice.name,
-        style: selectedGeminiEmotion.name,
-        multiSpeaker: false
-      }),
-    })
+  // Enhanced TTS audio generation with better error handling
+  const generateTTSAudio = async (text: string, slideNumber: number): Promise<Blob | null> => {
+    try {
+      // Validate text length
+      if (!text || text.trim().length === 0) {
+        console.warn(`⚠️ Empty text for slide ${slideNumber}, skipping TTS`)
+        return null
+      }
 
-    if (!response.ok) {
-      throw new Error(`TTS generation failed: ${response.status}`)
+      if (text.length > 32000) {
+        console.warn(`⚠️ Text too long for slide ${slideNumber} (${text.length} chars), truncating`)
+        text = text.substring(0, 32000)
+      }
+
+      const response = await fetch('/api/generate-tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text.trim(),
+          voiceName: selectedGeminiVoice.name,
+          style: selectedGeminiEmotion.name,
+          multiSpeaker: false
+        }),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        let errorMessage = `TTS generation failed: ${response.status}`
+        
+        try {
+          const errorData = JSON.parse(errorText)
+          if (errorData.error) {
+            errorMessage = errorData.error
+          }
+          if (errorData.details) {
+            errorMessage += ` - ${errorData.details}`
+          }
+        } catch {
+          // If not JSON, use the raw text
+          if (errorText) {
+            errorMessage += ` - ${errorText}`
+          }
+        }
+
+        throw new Error(errorMessage)
+      }
+
+      const blob = await response.blob()
+      
+      // Validate blob
+      if (!blob || blob.size === 0) {
+        throw new Error('Empty audio response received')
+      }
+
+      console.log(`✅ TTS generated for slide ${slideNumber}: ${blob.size} bytes`)
+      return blob
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown TTS error'
+      console.error(`❌ TTS error for slide ${slideNumber}:`, errorMessage)
+      
+      // Add to error collection for user feedback
+      setTtsErrors(prev => [...prev, `Slide ${slideNumber}: ${errorMessage}`])
+      
+      return null
     }
-
-    return await response.blob()
   }
 
   // Generate PowerPoint with TTS audio embedded with microphone controls
@@ -410,30 +459,44 @@ Oplossingen:
     setIsGeneratingTTSPowerPoint(true)
     setTtsProgress('PowerPoint met TTS microfoon wordt voorbereid...')
     setCurrentTTSSlide(0)
+    setTtsErrors([]) // Clear previous errors
 
     try {
-      // First, generate all TTS audio files
-      const audioBlobs: Blob[] = []
+      // First, generate all TTS audio files with enhanced error handling
+      const audioBlobs: (Blob | null)[] = []
+      let successfulTTS = 0
+      let failedTTS = 0
       
       for (let i = 0; i < scripts.length; i++) {
         const script = scripts[i]
-        if (!script) continue
-
+        const slideNumber = slides[i]?.slideNumber || i + 1
+        
         setCurrentTTSSlide(i + 1)
-        setTtsProgress(`TTS audio genereren voor slide ${i + 1}/${scripts.length}...`)
+        setTtsProgress(`TTS audio genereren voor slide ${slideNumber} (${i + 1}/${scripts.length})...`)
 
-        try {
-          const audioBlob = await generateTTSAudio(script)
-          audioBlobs.push(audioBlob)
-          console.log(`✅ TTS generated for slide ${i + 1}`)
-        } catch (audioError) {
-          console.error(`❌ TTS error for slide ${i + 1}:`, audioError)
-          // Create empty blob as fallback
-          audioBlobs.push(new Blob())
+        if (!script || script.trim().length === 0) {
+          console.warn(`⚠️ No script for slide ${slideNumber}, skipping TTS`)
+          audioBlobs.push(null)
+          continue
+        }
+
+        const audioBlob = await generateTTSAudio(script, slideNumber)
+        audioBlobs.push(audioBlob)
+        
+        if (audioBlob) {
+          successfulTTS++
+        } else {
+          failedTTS++
+        }
+
+        // Add small delay to avoid rate limiting
+        if (i < scripts.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500))
         }
       }
 
-      setTtsProgress('PowerPoint wordt samengesteld met TTS microfoon per slide...')
+      // Show TTS generation summary
+      setTtsProgress(`TTS generatie voltooid: ${successfulTTS} succesvol, ${failedTTS} gefaald. PowerPoint wordt samengesteld...`)
 
       // Create enhanced slides data with TTS audio and microphone controls
       const enhancedSlides = slides.map((slide, index) => ({
@@ -441,7 +504,7 @@ Oplossingen:
         script: scripts[index] || '',
         audioBlob: audioBlobs[index] || null,
         // Add microphone control metadata
-        hasMicrophone: true,
+        hasMicrophone: audioBlobs[index] !== null,
         autoPlay: true,
         ttsVoice: selectedGeminiVoice.name,
         ttsEmotion: selectedGeminiEmotion.name
@@ -475,9 +538,16 @@ Oplossingen:
       if (!response.ok) {
         // Fallback to regular notes API if microphone API not available
         console.log('Microphone API not available, using regular notes API...')
+        const fallbackFormData = new FormData()
+        fallbackFormData.append('file', file)
+        fallbackFormData.append('slides', JSON.stringify(slides.map((slide, index) => ({
+          slideNumber: slide.slideNumber,
+          script: scripts[index] || ''
+        }))))
+        
         const fallbackResponse = await fetch('/api/add-notes', {
           method: 'POST',
-          body: formData,
+          body: fallbackFormData,
         })
         
         if (!fallbackResponse.ok) {
@@ -493,23 +563,48 @@ Oplossingen:
         saveAs(blob, fileName)
       }
       
-      setTtsProgress('PowerPoint met TTS microfoon succesvol gedownload!')
+      // Show completion message with summary
+      let completionMessage = 'PowerPoint met TTS microfoon succesvol gedownload!'
+      if (failedTTS > 0) {
+        completionMessage += ` (${successfulTTS}/${scripts.length} TTS audio bestanden gegenereerd)`
+      }
+      
+      setTtsProgress(completionMessage)
       console.log('✅ PowerPoint with TTS microphone download successful')
       
       setTimeout(() => {
         setIsGeneratingTTSPowerPoint(false)
         setTtsProgress('')
         setCurrentTTSSlide(0)
-      }, 3000)
+        setTtsErrors([])
+      }, 5000)
 
     } catch (error) {
       console.error('❌ PowerPoint TTS generation error:', error)
-      setTtsProgress('Fout bij PowerPoint TTS generatie: ' + (error instanceof Error ? error.message : 'Onbekende fout'))
+      let errorMessage = 'Fout bij PowerPoint TTS generatie: '
+      
+      if (error instanceof Error) {
+        if (error.message.includes('API configuratie ontbreekt') || 
+            error.message.includes('GEMINI_API_KEY')) {
+          errorMessage += 'Gemini API key niet geconfigureerd. Controleer je environment variables.'
+        } else if (error.message.includes('quota') || error.message.includes('429')) {
+          errorMessage += 'API quota bereikt. Probeer het later opnieuw.'
+        } else if (error.message.includes('network') || error.message.includes('fetch')) {
+          errorMessage += 'Netwerkprobleem. Controleer je internetverbinding.'
+        } else {
+          errorMessage += error.message
+        }
+      } else {
+        errorMessage += 'Onbekende fout'
+      }
+      
+      setTtsProgress(errorMessage)
       setTimeout(() => {
         setIsGeneratingTTSPowerPoint(false)
         setTtsProgress('')
         setCurrentTTSSlide(0)
-      }, 5000)
+        setTtsErrors([])
+      }, 10000)
     }
   }
 
@@ -619,6 +714,34 @@ Oplossingen:
             <span className="text-red-800 font-medium">Extractie Fout</span>
           </div>
           <p className="text-red-700 text-sm mt-1">{extractionError}</p>
+        </div>
+      )}
+
+      {/* TTS Errors Display */}
+      {ttsErrors.length > 0 && (
+        <div className="mb-6 p-4 bg-orange-50 border border-orange-200 rounded-lg">
+          <div className="flex items-center mb-2">
+            <svg className="w-5 h-5 text-orange-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="text-orange-800 font-medium">TTS Waarschuwingen ({ttsErrors.length})</span>
+          </div>
+          <div className="text-orange-700 text-sm space-y-1">
+            {ttsErrors.slice(0, 5).map((error, index) => (
+              <div key={index} className="flex items-start">
+                <span className="text-orange-500 mr-2">•</span>
+                <span>{error}</span>
+              </div>
+            ))}
+            {ttsErrors.length > 5 && (
+              <div className="text-orange-600 text-xs mt-2">
+                ... en {ttsErrors.length - 5} meer. PowerPoint wordt nog steeds gegenereerd met beschikbare audio.
+              </div>
+            )}
+          </div>
+          <div className="mt-3 p-2 bg-orange-100 rounded text-orange-700 text-xs">
+            💡 Tip: Controleer je GEMINI_API_KEY configuratie als veel TTS generaties falen.
+          </div>
         </div>
       )}
 

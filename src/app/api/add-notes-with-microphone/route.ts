@@ -40,7 +40,7 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Add notes to each slide (clean notes without microphone references)
+    // Add notes to each slide and embed invisible audio
     for (let i = 0; i < slides.length; i++) {
       const slide = slides[i]
       const slideNumber = i + 1
@@ -53,9 +53,9 @@ export async function POST(request: NextRequest) {
       // Add or update the notes file
       pptx.file(notesFileName, notesXml)
       
-      // Add audio to slide if audio exists
+      // Add invisible audio to slide if audio exists
       if (hasAudio) {
-        await addAudioToSlide(pptx, slideNumber, `audio${slideNumber}.wav`)
+        await addInvisibleAudioToSlide(pptx, slideNumber, `audio${slideNumber}.wav`)
       }
     }
 
@@ -75,12 +75,12 @@ export async function POST(request: NextRequest) {
     return new Response(modifiedPptx, {
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        'Content-Disposition': 'attachment; filename="presentation_with_tts_audio.pptx"',
+        'Content-Disposition': 'attachment; filename="presentation_with_invisible_tts.pptx"',
       },
     })
 
   } catch (error) {
-    console.error('Error adding TTS audio:', error)
+    console.error('Error adding invisible TTS audio:', error)
     return NextResponse.json(
       { error: 'Fout bij het toevoegen van TTS audio: ' + (error instanceof Error ? error.message : 'Onbekende fout') },
       { status: 500 }
@@ -88,7 +88,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Create clean notes XML without microphone references
+// Create clean notes XML without any audio references
 function createCleanNotesXml(scriptText: string, slideNumber: number): string {
   // Escape XML special characters
   const escapedScript = scriptText
@@ -157,8 +157,8 @@ function createCleanNotesXml(scriptText: string, slideNumber: number): string {
 </p:notes>`
 }
 
-// Add audio element to slide with proper PowerPoint audio controls and auto-play
-async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: string) {
+// Add invisible audio element to slide - no visual representation, just embedded audio with auto-play
+async function addInvisibleAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: string) {
   const slideFileName = `ppt/slides/slide${slideNumber}.xml`
   const slideFile = pptx.files[slideFileName]
   
@@ -171,18 +171,19 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
     let slideXml = await slideFile.async('text')
     
     // Generate unique IDs for this slide
-    const audioShapeId = 1000 + slideNumber
-    const audioRelId = `rId${100 + slideNumber}`
+    const audioShapeId = 2000 + slideNumber
+    const audioRelId = `rId${300 + slideNumber}`
     
-    // Add audio shape to slide - positioned in bottom right corner
-    const audioShape = `
+    // Add invisible audio shape - positioned off-screen but still functional
+    // This mimics how PowerPoint's native recording feature works
+    const invisibleAudioShape = `
     <p:pic>
       <p:nvPicPr>
-        <p:cNvPr id="${audioShapeId}" name="Audio ${slideNumber}">
+        <p:cNvPr id="${audioShapeId}" name="Slide ${slideNumber} Audio" descr="TTS Audio for Slide ${slideNumber}">
           <a:hlinkClick r:id="" action="ppaction://media"/>
         </p:cNvPr>
         <p:cNvPicPr>
-          <a:picLocks noChangeAspect="1"/>
+          <a:picLocks noChangeAspect="1" noMove="1" noResize="1" noRot="1" noSelect="1"/>
         </p:cNvPicPr>
         <p:nvPr>
           <a:audioFile r:embed="${audioRelId}"/>
@@ -194,41 +195,32 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
         </p:nvPr>
       </p:nvPicPr>
       <p:blipFill>
-        <a:blip r:embed="${audioRelId}">
-          <a:extLst>
-            <a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}">
-              <a14:useLocalDpi xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" val="0"/>
-            </a:ext>
-          </a:extLst>
-        </a:blip>
+        <a:blip r:embed="${audioRelId}"/>
         <a:stretch>
           <a:fillRect/>
         </a:stretch>
       </p:blipFill>
       <p:spPr>
         <a:xfrm>
-          <a:off x="8229600" y="5486400"/>
-          <a:ext cx="609600" cy="609600"/>
+          <a:off x="-100000" y="-100000"/>
+          <a:ext cx="1" cy="1"/>
         </a:xfrm>
         <a:prstGeom prst="rect">
           <a:avLst/>
         </a:prstGeom>
-        <a:solidFill>
-          <a:srgbClr val="4472C4"/>
-        </a:solidFill>
-        <a:ln w="12700">
-          <a:solidFill>
-            <a:srgbClr val="FFFFFF"/>
-          </a:solidFill>
+        <a:noFill/>
+        <a:ln>
+          <a:noFill/>
         </a:ln>
       </p:spPr>
     </p:pic>`
     
-    // Insert audio shape before closing spTree tag
-    slideXml = slideXml.replace('</p:spTree>', audioShape + '\n    </p:spTree>')
+    // Insert invisible audio shape before closing spTree tag
+    slideXml = slideXml.replace('</p:spTree>', invisibleAudioShape + '\n    </p:spTree>')
     
-    // Add comprehensive timing for auto-play when slide appears
-    const timingXml = `
+    // Add comprehensive timing for automatic playback during slideshow
+    // This is the key part that makes it work like PowerPoint's native recording
+    const autoPlayTimingXml = `
   <p:timing>
     <p:tnLst>
       <p:par>
@@ -240,15 +232,15 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
                   <p:par>
                     <p:cTn id="3" fill="hold">
                       <p:stCondLst>
-                        <p:cond evt="onBegin" delay="500"/>
+                        <p:cond evt="onBegin" delay="0"/>
                       </p:stCondLst>
                       <p:childTnLst>
                         <p:par>
                           <p:cTn id="4" fill="hold">
                             <p:childTnLst>
                               <p:audio>
-                                <p:cMediaNode vol="80000">
-                                  <p:cTn id="5" fill="hold" dur="indefinite">
+                                <p:cMediaNode vol="100000" mute="0" numSld="1" showWhenStopped="0">
+                                  <p:cTn id="5" fill="hold" dur="indefinite" autoRev="1">
                                     <p:stCondLst>
                                       <p:cond evt="onBegin" delay="0"/>
                                     </p:stCondLst>
@@ -273,41 +265,45 @@ async function addAudioToSlide(pptx: JSZip, slideNumber: number, audioFileName: 
     </p:tnLst>
   </p:timing>`
     
-    // Add timing section before closing slide tag if not already present
-    if (!slideXml.includes('<p:timing>')) {
-      slideXml = slideXml.replace('</p:sld>', timingXml + '\n</p:sld>')
+    // Replace existing timing or add new timing section
+    if (slideXml.includes('<p:timing>')) {
+      // Replace existing timing
+      slideXml = slideXml.replace(/<p:timing>[\s\S]*?<\/p:timing>/g, autoPlayTimingXml.trim())
+    } else {
+      // Add timing section before closing slide tag
+      slideXml = slideXml.replace('</p:sld>', autoPlayTimingXml + '\n</p:sld>')
     }
     
     // Update the slide file
     pptx.file(slideFileName, slideXml)
     
-    console.log(`Added audio controls with auto-play to slide ${slideNumber}`)
+    console.log(`Added invisible auto-play audio to slide ${slideNumber}`)
     
   } catch (error) {
-    console.error(`Error adding audio to slide ${slideNumber}:`, error)
+    console.error(`Error adding invisible audio to slide ${slideNumber}:`, error)
   }
 }
 
-// Update content types for audio files
+// Update content types for audio files and notes
 async function updateContentTypes(pptx: JSZip) {
   const contentTypesFile = pptx.files['[Content_Types].xml']
   if (!contentTypesFile) return
   
   let contentTypes = await contentTypesFile.async('text')
   
-  // Add notes slide content type if not present
-  if (!contentTypes.includes('application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml')) {
-    contentTypes = contentTypes.replace(
-      '</Types>',
-      '  <Override PartName="/ppt/notesSlides/notesSlide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>\n</Types>'
-    )
-  }
-  
   // Add audio content types
   if (!contentTypes.includes('audio/wav')) {
     contentTypes = contentTypes.replace(
       '</Types>',
       '  <Default Extension="wav" ContentType="audio/wav"/>\n</Types>'
+    )
+  }
+  
+  // Add notes slide content type if not present
+  if (!contentTypes.includes('application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml')) {
+    contentTypes = contentTypes.replace(
+      '</Types>',
+      '  <Default Extension="xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>\n</Types>'
     )
   }
   
@@ -324,7 +320,7 @@ async function updateRelationships(pptx: JSZip, slides: any[], audioFiles: { [ke
     // Add relationships for notes slides
     for (let i = 0; i < slides.length; i++) {
       const slideNumber = i + 1
-      const relId = `rId${200 + slideNumber}`
+      const relId = `rId${400 + slideNumber}`
       
       if (!rels.includes(`notesSlides/notesSlide${slideNumber}.xml`)) {
         rels = rels.replace(
@@ -345,7 +341,7 @@ async function updateRelationships(pptx: JSZip, slides: any[], audioFiles: { [ke
     const slideRelsPath = `ppt/slides/_rels/slide${slideNumber}.xml.rels`
     const slideRelsFile = pptx.files[slideRelsPath]
     
-    const audioRelId = `rId${100 + slideNumber}`
+    const audioRelId = `rId${300 + slideNumber}`
     const audioTarget = `../media/audio${slideNumber}.wav`
     
     if (slideRelsFile) {
